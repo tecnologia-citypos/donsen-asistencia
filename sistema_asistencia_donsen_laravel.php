@@ -5,18 +5,8 @@
  * SISTEMA DE CONTROL DE ASISTENCIA POR MEDIO DE CÓDIGOS QR - EMPRESA DONSEN
  * ============================================================================
  * Autor: Jose Sevilla | Tutor: Jesus Reina | IUTA - Caracas, 2026
- * Arquitectura: Laravel (PHP 8.1+) + MySQL (db_asistencia_donsen) + XAMPP
+ * Arquitectura: Laravel (PHP 8.1+) + PostgreSQL / MySQL (db_asistencia_donsen)
  * Patrón: Modelo-Vista-Controlador (MVC) con Programación Orientada a Objetos
- *
- * INSTRUCCIONES DE DESPLIEGUE AUTOMÁTICO EN XAMPP:
- * 1. Crea tu proyecto Laravel en htdocs:
- *    composer create-project laravel/laravel donsen-asistencia
- * 2. Copia este archivo dentro de la carpeta raíz: C:\xampp\htdocs\donsen-asistencia\
- * 3. Configura el archivo .env con DB_DATABASE=db_asistencia_donsen (MySQL en XAMPP)
- * 4. Ejecuta en la terminal dentro de la carpeta del proyecto:
- *    php sistema_asistencia_donsen_laravel.php
- *    php artisan migrate --seed
- *    php artisan serve
  * ============================================================================
  */
 
@@ -36,18 +26,15 @@ use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    /**
-     * Ejecuta las migraciones para crear las tablas normalizadas en MySQL (XAMPP).
-     */
     public function up(): void
     {
-        // 1. Modificación / Creación de tabla users con campo 'rol'
+        // 1. Tabla: users con campo 'rol'
         if (!Schema::hasTable('users')) {
             Schema::create('users', function (Blueprint $table) {
                 $table->id();
                 $table->string('name', 100);
                 $table->string('email', 150)->unique();
-                $table->string('password', 255); // Cifrado Bcrypt nativo
+                $table->string('password', 255);
                 $table->enum('rol', ['Director General', 'Administradora'])->default('Administradora');
                 $table->rememberToken();
                 $table->timestamps();
@@ -62,7 +49,7 @@ return new class extends Migration
             });
         }
 
-        // 2. Tabla: departamentos (Dirección, Administración, Almacén, Transporte)
+        // 2. Tabla: departamentos
         Schema::create('departamentos', function (Blueprint $table) {
             $table->id();
             $table->string('nombre_departamento', 80);
@@ -70,7 +57,7 @@ return new class extends Migration
             $table->timestamps();
         });
 
-        // 3. Tabla: horarios (Turnos y margen de tolerancia para retardos)
+        // 3. Tabla: horarios
         Schema::create('horarios', function (Blueprint $table) {
             $table->id();
             $table->string('turno', 50);
@@ -80,7 +67,7 @@ return new class extends Migration
             $table->timestamps();
         });
 
-        // 4. Tabla: empleados (Ficha laboral y token QR individual único)
+        // 4. Tabla: empleados
         Schema::create('empleados', function (Blueprint $table) {
             $table->id();
             $table->string('cedula', 20)->unique();
@@ -95,11 +82,11 @@ return new class extends Migration
                   ->onUpdate('cascade')
                   ->onDelete('restrict');
             $table->string('codigo_qr_empleado', 255)->unique();
-            $table->boolean('estado')->default(true); // TINYINT(1): 1=Activo, 0=Inactivo
+            $table->boolean('estado')->default(true);
             $table->timestamps();
         });
 
-        // 5. Tabla: sede_qrs (Código QR institucional fijo ubicado en la sede Donsen)
+        // 5. Tabla: sede_qrs
         Schema::create('sede_qrs', function (Blueprint $table) {
             $table->id();
             $table->string('nombre_sede', 100);
@@ -109,7 +96,7 @@ return new class extends Migration
             $table->timestamps();
         });
 
-        // 6. Tabla: asistencias (Registros auditables de doble validación QR)
+        // 6. Tabla: asistencias
         Schema::create('asistencias', function (Blueprint $table) {
             $table->id();
             $table->foreignId('empleado_id')
@@ -126,14 +113,10 @@ return new class extends Migration
             $table->enum('estatus', ['A tiempo', 'Retardo', 'Inasistencia'])->default('A tiempo');
             $table->timestamps();
 
-            // Índice único para impedir registros duplicados de un empleado en la misma fecha
             $table->unique(['empleado_id', 'fecha'], 'idx_empleado_fecha_unica');
         });
     }
 
-    /**
-     * Revierte las migraciones en orden inverso de integridad referencial.
-     */
     public function down(): void
     {
         Schema::dropIfExists('asistencias');
@@ -165,13 +148,8 @@ use Carbon\Carbon;
 
 class DatabaseSeeder extends Seeder
 {
-    /**
-     * Pobla la base de datos db_asistencia_donsen con los datos organizacionales
-     * reales de la empresa Donsen (9 trabajadores, 4 departamentos y QR de sede).
-     */
     public function run(): void
     {
-        // Usuarios Administrativos con cifrado Bcrypt (CU-03)
         User::updateOrCreate(
             ['email' => 'director@donsen.com'],
             [
@@ -190,7 +168,6 @@ class DatabaseSeeder extends Seeder
             ]
         );
 
-        // Departamentos de Donsen (Figura 1 - Organigrama)
         $dir = Departamento::create([
             'nombre_departamento' => 'Dirección',
             'descripcion' => 'Dirección General y toma de decisiones estratégicas.',
@@ -208,7 +185,6 @@ class DatabaseSeeder extends Seeder
             'descripcion' => 'Logística y distribución vehicular de mercancía.',
         ]);
 
-        // Horarios Laborales y Tolerancia
         $turnoAdmin = Horario::create([
             'turno' => 'Turno Administrativo',
             'hora_entrada' => '08:00:00',
@@ -223,7 +199,6 @@ class DatabaseSeeder extends Seeder
             'tolerancia_min' => 15,
         ]);
 
-        // Código QR Institucional Fijo de la Sede Principal Caracas
         $sede = SedeQr::create([
             'nombre_sede' => 'Sede Principal Caracas',
             'codigo_qr_fijo' => 'DONSEN-SEDE-CCS-2026',
@@ -231,7 +206,6 @@ class DatabaseSeeder extends Seeder
             'activo' => true,
         ]);
 
-        // Población Censal: 9 Trabajadores de Donsen (Tabla 1 del TEG)
         $plantilla = [
             ['V-15.420.110', 'Carlos Mendoza', 'Director General', $dir->id, $turnoAdmin->id, 'DONSEN-EMP-001-15420110'],
             ['V-19.834.512', 'María Fernanda Gómez', 'Administradora', $adm->id, $turnoAdmin->id, 'DONSEN-EMP-002-19834512'],
@@ -257,7 +231,6 @@ class DatabaseSeeder extends Seeder
             ]);
         }
 
-        // Registros de muestra para hoy (dejando 3 almacenistas pendientes para pruebas en vivo)
         $hoy = Carbon::today()->toDateString();
         $muestrasHoy = [
             [$empleadosCreados[0]->id, '07:55:00', null, 'A tiempo'],
@@ -372,10 +345,6 @@ class Horario extends Model
         return $this->hasMany(Empleado::class, 'horario_id');
     }
 
-    /**
-     * Evalúa si una hora de marcaje se encuentra 'A tiempo' o en 'Retardo'
-     * según la hora_entrada estipulada y los minutos de tolerancia.
-     */
     public function calcularEstatusPuntualidad(Carbon $horaMarcaje): string
     {
         $entradaOficial = Carbon::parse($horaMarcaje->toDateString() . ' ' . $this->hora_entrada);
@@ -465,9 +434,6 @@ class Empleado extends Model
         return $this->hasMany(Asistencia::class, 'empleado_id');
     }
 
-    /**
-     * Genera un token QR individual único basado en el ID correlativo y la cédula.
-     */
     public static function generarTokenQR(int $correlativo, string $cedula): string
     {
         $soloDigitos = preg_replace('/\D/', '', $cedula) ?: (string) (10000000 + $correlativo);
@@ -508,9 +474,6 @@ class Asistencia extends Model
         return $this->belongsTo(SedeQr::class, 'sede_qr_id');
     }
 
-    /**
-     * Calcula el total de horas y minutos laborados entre entrada y salida.
-     */
     public function getHorasLaboradasAttribute(): string
     {
         if (!$this->hora_entrada) {
@@ -713,6 +676,15 @@ class EmpleadoController extends Controller
         return redirect()->route('empleados.index')
                          ->with('success', 'Estado laboral actualizado para ' . $empleado->nombres_apellidos);
     }
+
+    public function destroy(Empleado $empleado)
+    {
+        $nombre = $empleado->nombres_apellidos;
+        $empleado->delete();
+
+        return redirect()->route('empleados.index')
+                         ->with('success', 'Empleado eliminado del sistema: ' . $nombre);
+    }
 }
 LARAVEL_FILE,
 
@@ -729,9 +701,6 @@ use Carbon\Carbon;
 
 class AsistenciaController extends Controller
 {
-    /**
-     * Muestra la interfaz móvil/web ligera de escaneo QR para los trabajadores.
-     */
     public function vistaEscaner()
     {
         $hoy = Carbon::today()->toDateString();
@@ -746,9 +715,6 @@ class AsistenciaController extends Controller
         return view('scanner.index', compact('empleados', 'asistenciasHoy', 'sedeQr', 'hoy'));
     }
 
-    /**
-     * Endpoint AJAX que valida el QR fijo de sede + QR individual del empleado (CU-01 / CU-02).
-     */
     public function registrarMarcaje(Request $request)
     {
         $request->validate([
@@ -757,7 +723,6 @@ class AsistenciaController extends Controller
             'hora_simulada' => ['nullable', 'date_format:H:i'],
         ]);
 
-        // Paso 1: Validar QR Institucional Fijo de Donsen
         $sede = SedeQr::validarCodigo($request->qr_sede);
         if (!$sede) {
             return response()->json([
@@ -768,7 +733,6 @@ class AsistenciaController extends Controller
             ], 400);
         }
 
-        // Paso 2: Validar QR Individual del Trabajador
         $empleado = Empleado::with(['horario', 'departamento'])
             ->where('codigo_qr_empleado', trim($request->qr_empleado))
             ->first();
@@ -804,7 +768,7 @@ class AsistenciaController extends Controller
         if (!$registro || !$registro->hora_entrada) {
             $estatus = $empleado->horario->calcularEstatusPuntualidad($horaActual);
 
-            $asistencia = Asistencia::updateOrCreate(
+            Asistencia::updateOrCreate(
                 ['empleado_id' => $empleado->id, 'fecha' => $hoy],
                 [
                     'sede_qr_id' => $sede->id,
@@ -827,9 +791,8 @@ class AsistenciaController extends Controller
             ]);
         }
 
-        // ESCENARIO B: Registro de SALIDA (si ya tiene entrada y no tiene salida)
+        // ESCENARIO B: Registro de SALIDA
         if ($registro->hora_entrada && !$registro->hora_salida) {
-            // Bloqueo anti-duplicidad accidental dentro de los primeros 60 segundos reales
             if (!$request->filled('hora_simulada') && $registro->created_at && $registro->created_at->diffInSeconds(Carbon::now()) < 60) {
                 return response()->json([
                     'ok' => false,
@@ -859,7 +822,7 @@ class AsistenciaController extends Controller
             ]);
         }
 
-        // ESCENARIO C: Jornada ya cerrada (PF-04)
+        // ESCENARIO C: Jornada ya cerrada
         return response()->json([
             'ok' => false,
             'tipo' => 'blocked',
@@ -926,9 +889,6 @@ class ReporteController extends Controller
         ));
     }
 
-    /**
-     * Exporta los registros filtrados a Excel (CSV con codificación UTF-8 BOM).
-     */
     public function exportarCsv(Request $request)
     {
         [$registros, $desde, $hasta] = $this->construirConsultaFiltrada($request);
@@ -941,7 +901,6 @@ class ReporteController extends Controller
 
         $callback = function () use ($registros) {
             $salida = fopen('php://output', 'w');
-            // BOM UTF-8 para compatibilidad directa con Microsoft Excel en español
             fprintf($salida, chr(0xEF) . chr(0xBB) . chr(0xBF));
 
             fputcsv($salida, [
@@ -976,9 +935,6 @@ class ReporteController extends Controller
         return response()->stream($callback, 200, $headers);
     }
 
-    /**
-     * Renderiza la vista oficial optimizada para impresión / guardado en PDF.
-     */
     public function vistaPdf(Request $request)
     {
         [$registros, $desde, $hasta] = $this->construirConsultaFiltrada($request);
@@ -1008,7 +964,7 @@ Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
 Route::get('/marcaje-qr', [AsistenciaController::class, 'vistaEscaner'])->name('scanner.index');
 Route::post('/api/marcar-asistencia', [AsistenciaController::class, 'registrarMarcaje'])->name('api.marcar');
 
-// Rutas Administrativas Protegidas por Autenticación Laravel (Director General / Administradoras)
+// Rutas Administrativas Protegidas por Autenticación Laravel
 Route::middleware(['auth'])->group(function () {
     Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
 
@@ -1017,6 +973,7 @@ Route::middleware(['auth'])->group(function () {
     Route::post('/empleados', [EmpleadoController::class, 'store'])->name('empleados.store');
     Route::put('/empleados/{empleado}', [EmpleadoController::class, 'update'])->name('empleados.update');
     Route::patch('/empleados/{empleado}/estado', [EmpleadoController::class, 'toggleEstado'])->name('empleados.toggle');
+    Route::delete('/empleados/{empleado}', [EmpleadoController::class, 'destroy'])->name('empleados.destroy');
 
     // Consultas y Reportes Gerenciales (Excel CSV y PDF)
     Route::get('/reportes', [ReporteController::class, 'index'])->name('reportes.index');
@@ -1083,7 +1040,7 @@ LARAVEL_FILE,
                 <div class="hidden sm:block h-8 w-px bg-gray-200"></div>
                 <div class="hidden sm:block">
                     <div class="text-sm font-bold text-[#373A39]">Control de Asistencia QR</div>
-                    <div class="text-[11px] text-gray-500">Laravel MVC • MySQL (db_asistencia_donsen)</div>
+                    <div class="text-[11px] text-gray-500">Laravel MVC • Base de Datos (db_asistencia_donsen)</div>
                 </div>
             </div>
 
@@ -1165,7 +1122,6 @@ LARAVEL_FILE,
 </head>
 <body class="min-h-screen bg-[#F4F6F5] flex items-center justify-center p-4">
     <div class="max-w-4xl w-full grid grid-cols-1 lg:grid-cols-12 bg-white rounded-2xl shadow-xl border border-gray-200 overflow-hidden">
-        <!-- Columna Identidad Donsen y Acceso Directo Empleado -->
         <div class="lg:col-span-5 bg-[#373A39] text-white p-8 flex flex-col justify-between">
             <div>
                 <div class="bg-white rounded-xl p-4 inline-block shadow-md mb-6">
@@ -1188,7 +1144,6 @@ LARAVEL_FILE,
             </div>
         </div>
 
-        <!-- Formulario de Login Administrativo -->
         <div class="lg:col-span-7 p-8 sm:p-10 flex flex-col justify-center">
             <h2 class="text-2xl font-bold text-[#373A39]">Acceso Administrativo</h2>
             <p class="text-sm text-gray-500 mt-1 mb-6">Ingrese sus credenciales de Director General o Administradora.</p>
@@ -1242,7 +1197,6 @@ LARAVEL_FILE,
         </div>
     </div>
 
-    <!-- Tarjetas KPI -->
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div class="bg-white p-5 rounded-2xl border border-gray-200">
             <div class="text-xs font-bold uppercase text-gray-400">Empleados Activos</div>
@@ -1266,7 +1220,6 @@ LARAVEL_FILE,
         </div>
     </div>
 
-    <!-- Tabla en Tiempo Real -->
     <div class="bg-white rounded-2xl border border-gray-200 overflow-hidden">
         <div class="p-5 border-b border-gray-100">
             <h2 class="text-base font-bold text-[#373A39]">Monitoreo de Jornada Actual</h2>
@@ -1332,7 +1285,7 @@ LARAVEL_FILE,
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
             <h1 class="text-2xl font-extrabold text-[#373A39]">Gestión de Personal y Códigos QR</h1>
-            <p class="text-sm text-gray-500">Registro CRUD de empleados y emisión de credenciales QR individuales</p>
+            <p class="text-sm text-gray-500">Registro CRUD de empleados, control de estado y emisión de credenciales QR</p>
         </div>
         <button type="button" onclick="document.getElementById('modal-nuevo-emp').classList.remove('hidden')"
                 class="px-4 py-2.5 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs font-bold">
@@ -1340,7 +1293,6 @@ LARAVEL_FILE,
         </button>
     </div>
 
-    <!-- Tarjeta QR Institucional Fijo de Sede -->
     @if($sedeQr)
     <div class="bg-white p-5 rounded-2xl border border-gray-200 flex flex-col sm:flex-row items-center justify-between gap-4">
         <div class="flex items-center gap-4">
@@ -1354,7 +1306,6 @@ LARAVEL_FILE,
     </div>
     @endif
 
-    <!-- Tabla de Empleados -->
     <div class="bg-white rounded-2xl border border-gray-200 overflow-hidden">
         <div class="overflow-x-auto">
             <table class="w-full text-left border-collapse">
@@ -1366,7 +1317,7 @@ LARAVEL_FILE,
                         <th class="py-3 px-4">Horario</th>
                         <th class="py-3 px-4">Token QR</th>
                         <th class="py-3 px-4">Estado</th>
-                        <th class="py-3 px-4 text-right">Carnet QR</th>
+                        <th class="py-3 px-4 text-right">Acciones</th>
                     </tr>
                 </thead>
                 <tbody class="divide-y divide-gray-100 text-sm">
@@ -1385,12 +1336,22 @@ LARAVEL_FILE,
                                 </button>
                             </form>
                         </td>
-                        <td class="py-3 px-4 text-right">
-                            <button type="button"
-                                    onclick="mostrarCarnetQR('{{ $emp->nombres_apellidos }}', '{{ $emp->cargo }}', '{{ $emp->cedula }}', '{{ $emp->codigo_qr_empleado }}')"
-                                    class="px-3 py-1.5 rounded-xl bg-[#197328] text-white text-xs font-bold">
-                                <i class="fa-solid fa-qrcode mr-1"></i>Ver QR
-                            </button>
+                        <td class="py-3 px-4 text-right whitespace-nowrap">
+                            <div class="inline-flex items-center gap-1.5">
+                                <button type="button"
+                                        onclick="mostrarCarnetQR('{{ $emp->nombres_apellidos }}', '{{ $emp->cargo }}', '{{ $emp->cedula }}', '{{ $emp->codigo_qr_empleado }}')"
+                                        class="px-3 py-1.5 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs font-bold">
+                                    <i class="fa-solid fa-qrcode mr-1"></i>Ver QR
+                                </button>
+                                <form method="POST" action="{{ route('empleados.destroy', $emp) }}"
+                                      onsubmit="return confirm('¿Eliminar a {{ $emp->nombres_apellidos }} y todo su historial de asistencia?');">
+                                    @csrf @method('DELETE')
+                                    <button type="submit" title="Eliminar empleado"
+                                            class="px-2.5 py-1.5 rounded-xl bg-red-50 hover:bg-red-600 text-red-600 hover:text-white text-xs font-bold transition">
+                                        <i class="fa-solid fa-trash"></i>
+                                    </button>
+                                </form>
+                            </div>
                         </td>
                     </tr>
                     @endforeach
@@ -1477,7 +1438,6 @@ LARAVEL_FILE,
         <p class="text-xs text-gray-500 mt-1">Paso 1: Validar QR Fijo de Sede • Paso 2: Escanear QR Individual</p>
     </div>
 
-    <!-- Paso 1: QR Fijo de la Sede -->
     <div id="paso-1-card" class="bg-white p-6 rounded-2xl border border-gray-200 space-y-4">
         <h2 class="text-base font-bold text-[#373A39]">1. Validar QR Fijo de la Sede Principal</h2>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -1490,13 +1450,11 @@ LARAVEL_FILE,
         </div>
     </div>
 
-    <!-- Visor Cámara -->
     <div id="visor-camara-card" class="hidden bg-white p-4 rounded-2xl border-2 border-[#197328] space-y-2">
         <div id="qr-reader" class="w-full rounded-xl overflow-hidden"></div>
         <button type="button" onclick="detenerCamara()" class="w-full py-2 rounded-xl bg-red-50 text-red-600 text-xs font-bold">Cerrar Cámara</button>
     </div>
 
-    <!-- Paso 2: QR Individual del Empleado -->
     <div id="paso-2-card" class="hidden bg-white p-6 rounded-2xl border border-gray-200 space-y-4">
         <div class="p-3 rounded-xl bg-[#E8F3EA] text-[#197328] text-xs font-bold">
             <i class="fa-solid fa-check-circle mr-1"></i>Sede Verificada: <span id="sede-activa-label"></span>
@@ -1515,12 +1473,11 @@ LARAVEL_FILE,
             </select>
             <button type="button" onclick="enviarMarcajeAjax(document.getElementById('select-empleado-qr').value)"
                     class="w-full py-3 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs font-bold">
-                <i class="fa-solid fa-qrcode mr-1.5"></i>Registrar Asistencia en MySQL
+                <i class="fa-solid fa-qrcode mr-1.5"></i>Registrar Asistencia en Base de Datos
             </button>
         </div>
     </div>
 
-    <!-- Resultado de Confirmación -->
     <div id="resultado-marcaje-box" class="hidden bg-white p-6 rounded-2xl border-2 shadow-md space-y-2"></div>
 </div>
 
@@ -1612,7 +1569,6 @@ LARAVEL_FILE,
         </div>
     </div>
 
-    <!-- Filtros -->
     <form method="GET" action="{{ route('reportes.index') }}" class="bg-white p-5 rounded-2xl border border-gray-200 grid grid-cols-1 sm:grid-cols-5 gap-3">
         <input type="date" name="desde" value="{{ $desde }}" class="px-3 py-2 rounded-xl border text-xs">
         <input type="date" name="hasta" value="{{ $hasta }}" class="px-3 py-2 rounded-xl border text-xs">
@@ -1631,7 +1587,6 @@ LARAVEL_FILE,
         <button type="submit" class="py-2 px-4 rounded-xl bg-[#197328] text-white text-xs font-bold">Filtrar Resultados</button>
     </form>
 
-    <!-- Tabla de Resultados -->
     <div class="bg-white rounded-2xl border border-gray-200 overflow-hidden">
         <div class="overflow-x-auto">
             <table class="w-full text-left border-collapse">
@@ -1728,9 +1683,6 @@ LARAVEL_FILE,
 LARAVEL_FILE,
 ];
 
-// =============================================================================
-// DESPLEGADOR AUTOMÁTICO EN PROYECTO LARAVEL (EJECUCIÓN POR CONSOLA CLI)
-// =============================================================================
 if (PHP_SAPI === 'cli') {
     echo "=================================================================\n";
     echo " INSTALADOR MVC LARAVEL - SISTEMA DE ASISTENCIA QR DONSEN (2026) \n";
@@ -1752,8 +1704,5 @@ if (PHP_SAPI === 'cli') {
     }
 
     echo "\nInstalación de archivos Laravel completada con éxito.\n";
-    echo "Ejecuta ahora:\n";
-    echo "  1) php artisan migrate --seed\n";
-    echo "  2) php artisan serve\n";
     echo "=================================================================\n";
 }

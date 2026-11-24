@@ -309,7 +309,7 @@ class DatabaseSeeder extends Seeder
             ]);
         }
 
-        $hoy = Carbon::today()->toDateString();
+        $hoy = Carbon::today('America/Caracas')->toDateString();
         $muestrasHoy = [
             [$empleadosCreados[0]->id, '07:55:00', null, 'A tiempo'],
             [$empleadosCreados[1]->id, '08:02:00', null, 'A tiempo'],
@@ -425,7 +425,7 @@ class Horario extends Model
 
     public function calcularEstatusPuntualidad(Carbon $horaMarcaje): string
     {
-        $entradaOficial = Carbon::parse($horaMarcaje->toDateString() . ' ' . $this->hora_entrada);
+        $entradaOficial = Carbon::parse($horaMarcaje->toDateString() . ' ' . $this->hora_entrada, 'America/Caracas');
         $limiteTolerancia = $entradaOficial->copy()->addMinutes((int) $this->tolerancia_min);
 
         return $horaMarcaje->gt($limiteTolerancia) ? 'Retardo' : 'A tiempo';
@@ -668,7 +668,7 @@ class DashboardController extends Controller
 {
     public function index()
     {
-        $hoy = Carbon::today()->toDateString();
+        $hoy = Carbon::today('America/Caracas')->toDateString();
 
         $empleadosActivos = Empleado::with(['departamento', 'horario'])
             ->where('estado', true)
@@ -842,7 +842,7 @@ class AsistenciaController extends Controller
 {
     public function vistaEscaner(Request $request)
     {
-        $hoy = Carbon::today()->toDateString();
+        $hoy = Carbon::today('America/Caracas')->toDateString();
         $empleados = Empleado::with('horario')
             ->where('estado', true)
             ->orderBy('nombres_apellidos')
@@ -994,10 +994,10 @@ class AsistenciaController extends Controller
             }
         }
 
-        $hoy = Carbon::today()->toDateString();
+        $hoy = Carbon::today('America/Caracas')->toDateString();
         $horaActual = $request->filled('hora_simulada')
-            ? Carbon::parse($hoy . ' ' . $request->hora_simulada . ':00')
-            : Carbon::now();
+            ? Carbon::parse($hoy . ' ' . $request->hora_simulada . ':00', 'America/Caracas')
+            : Carbon::now('America/Caracas');
 
         $registro = Asistencia::where('empleado_id', $empleado->id)
             ->where('fecha', $hoy)
@@ -1098,8 +1098,8 @@ class ReporteController extends Controller
 {
     private function construirConsultaFiltrada(Request $request)
     {
-        $desde = $request->input('desde', Carbon::today()->subDays(7)->toDateString());
-        $hasta = $request->input('hasta', Carbon::today()->toDateString());
+        $desde = $request->input('desde', Carbon::today('America/Caracas')->subDays(7)->toDateString());
+        $hasta = $request->input('hasta', Carbon::today('America/Caracas')->toDateString());
 
         $query = Asistencia::with(['empleado.departamento', 'sedeQr'])
             ->whereBetween('fecha', [$desde, $hasta]);
@@ -1185,6 +1185,38 @@ class ReporteController extends Controller
     {
         [$registros, $desde, $hasta] = $this->construirConsultaFiltrada($request);
         return view('reportes.pdf', compact('registros', 'desde', 'hasta'));
+    }
+}
+LARAVEL_FILE,
+
+    // =========================================================================
+    // 4B. SERVICE PROVIDER (ZONA HORARIA VENEZUELA America/Caracas + HTTPS)
+    // =========================================================================
+    'app/Providers/AppServiceProvider.php' => <<<'LARAVEL_FILE'
+<?php
+
+namespace App\Providers;
+
+use Illuminate\Support\ServiceProvider;
+use Illuminate\Support\Facades\URL;
+use Carbon\Carbon;
+
+class AppServiceProvider extends ServiceProvider
+{
+    public function register(): void
+    {
+        //
+    }
+
+    public function boot(): void
+    {
+        config(['app.timezone' => 'America/Caracas']);
+        date_default_timezone_set('America/Caracas');
+        Carbon::setLocale('es');
+
+        if (config('app.env') === 'production') {
+            URL::forceScheme('https');
+        }
     }
 }
 LARAVEL_FILE,
@@ -2226,7 +2258,7 @@ LARAVEL_FILE,
             </div>
         </div>
         <div class="text-right text-xs text-gray-500">
-            <div>Emisión: {{ now()->format('d/m/Y H:i') }}</div>
+            <div>Emisión: {{ now('America/Caracas')->format('d/m/Y H:i') }}</div>
             <div>BD: db_asistencia_donsen</div>
         </div>
     </div>

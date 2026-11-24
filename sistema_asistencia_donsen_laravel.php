@@ -228,7 +228,7 @@ class DatabaseSeeder extends Seeder
         User::updateOrCreate(
             ['email' => 'director@donsen.com'],
             [
-                'name' => 'Domenico Ferro',
+                'name' => 'Carlos Mendoza',
                 'password' => Hash::make('password123'),
                 'rol' => 'Director General',
             ]
@@ -285,7 +285,7 @@ class DatabaseSeeder extends Seeder
         ]);
 
         $plantilla = [
-            ['V-15.420.110', 'Domenico Ferro', 'Director General', $dir->id, $turnoAdmin->id, 'DONSEN-EMP-001-15420110'],
+            ['V-15.420.110', 'Carlos Mendoza', 'Director General', $dir->id, $turnoAdmin->id, 'DONSEN-EMP-001-15420110'],
             ['V-19.834.512', 'María Fernanda Gómez', 'Administradora', $adm->id, $turnoAdmin->id, 'DONSEN-EMP-002-19834512'],
             ['V-21.309.874', 'Daniela Rodríguez', 'Administradora', $adm->id, $turnoAdmin->id, 'DONSEN-EMP-003-21309874'],
             ['V-17.652.390', 'Roberto Castillo', 'Jefe de Almacén', $alm->id, $turnoAlmacen->id, 'DONSEN-EMP-004-17652390'],
@@ -469,7 +469,7 @@ class SedeQr extends Model
 
     public static function validarCodigo(string $codigo): ?self
     {
-        return self::where('codigo_qr_fijo', trim($codigo))
+        return self::where('codigo_qr_fijo', strtoupper(trim($codigo)))
                    ->where('activo', true)
                    ->first();
     }
@@ -885,7 +885,7 @@ class AsistenciaController extends Controller
                 'ok' => false,
                 'tipo' => 'error',
                 'titulo' => 'QR de Sede Inválido',
-                'mensaje' => 'El código institucional escaneado no pertenece a una sede activa de Donsen.',
+                'mensaje' => 'El código de sede recibido (' . $rawSede . ') no corresponde al QR oficial de la entrada de Donsen. Presione "Cambiar QR" y escanee el cartel de la entrada.',
             ], 400);
         }
 
@@ -960,7 +960,6 @@ class AsistenciaController extends Controller
         $deviceToken = trim($request->device_token);
 
         if (!$esAdminEnPruebas) {
-            // 1. Verificar si este teléfono ya pertenece a OTRO compañero
             $duenoDispositivo = Empleado::where('device_token', $deviceToken)
                 ->where('id', '!=', $empleado->id)
                 ->first();
@@ -976,7 +975,6 @@ class AsistenciaController extends Controller
                 ], 403);
             }
 
-            // 2. Verificar si el empleado ya tiene vinculado otro teléfono distinto
             if ($empleado->device_token && $empleado->device_token !== $deviceToken) {
                 return response()->json([
                     'ok' => false,
@@ -988,7 +986,6 @@ class AsistenciaController extends Controller
                 ], 403);
             }
 
-            // 3. Si es su primer marcaje, vincular este teléfono a su ficha
             if (!$empleado->device_token) {
                 $empleado->update([
                     'device_token' => $deviceToken,
@@ -1548,7 +1545,9 @@ LARAVEL_FILE,
     <div class="bg-white p-5 rounded-2xl border border-gray-200 space-y-4">
         <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             <div class="flex items-center gap-4">
-                <div id="qr-sede-preview" class="p-2 bg-white border border-gray-200 rounded-xl shrink-0"></div>
+                <div id="qr-sede-preview" class="p-2.5 bg-white border border-gray-200 rounded-xl shrink-0 cursor-pointer"
+                     onclick="document.getElementById('modal-cartel-sede').classList.remove('hidden')"
+                     title="Clic para ampliar QR de entrada"></div>
                 <div>
                     <div class="flex flex-wrap items-center gap-2">
                         <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#E8F3EA] text-[#197328]">QR Fijo Físico + Geocerca GPS</span>
@@ -1560,13 +1559,17 @@ LARAVEL_FILE,
                         @endif
                     </div>
                     <h2 class="text-base font-bold text-[#373A39] mt-1">{{ $sedeQr->nombre_sede }} (Radio permitido: {{ $sedeQr->radio_metros }}m)</h2>
-                    <p class="text-xs text-gray-500">{{ $sedeQr->ubicacion }} • Enlace QR: <code class="font-bold text-[#197328]">{{ url('/marcaje-qr?sede=' . $sedeQr->codigo_qr_fijo) }}</code></p>
+                    <p class="text-xs text-gray-500">{{ $sedeQr->ubicacion }} • Código: <code class="font-bold text-[#197328]">{{ $sedeQr->codigo_qr_fijo }}</code></p>
                 </div>
             </div>
             <div class="flex flex-wrap gap-2">
+                <button type="button" onclick="document.getElementById('modal-cartel-sede').classList.remove('hidden')"
+                        class="px-3.5 py-2 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs font-bold">
+                    <i class="fa-solid fa-expand mr-1.5"></i>Ver Cartel QR Grande
+                </button>
                 <button type="button" onclick="descargarCartelQRSede()"
                         class="px-3.5 py-2 rounded-xl bg-[#373A39] hover:bg-black text-white text-xs font-bold">
-                    <i class="fa-solid fa-download mr-1.5"></i>Descargar QR Físico (PNG)
+                    <i class="fa-solid fa-download mr-1.5"></i>Descargar Cartel (PNG)
                 </button>
                 <button type="button" onclick="document.getElementById('form-gps-sede').classList.toggle('hidden')"
                         class="px-3.5 py-2 rounded-xl bg-[#E8F3EA] text-[#197328] text-xs font-bold">
@@ -1706,11 +1709,37 @@ LARAVEL_FILE,
     </div>
 </div>
 
+<!-- Modal Cartel QR Grande de la Sede (Alta Resolución para Escaneo Rápido) -->
+@if($sedeQr)
+<div id="modal-cartel-sede" class="hidden fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-sm w-full p-6 text-center space-y-4 border-2 border-[#197328]">
+        <div class="flex justify-center"><x-donsen-logo :width="150" /></div>
+        <div class="text-xs font-extrabold uppercase tracking-wider text-[#197328]">Punto de Marcaje de Asistencia</div>
+        <div class="bg-white p-5 border-2 border-gray-200 rounded-2xl inline-block">
+            <div id="qr-sede-hd"></div>
+        </div>
+        <div>
+            <div class="text-sm font-extrabold text-[#373A39]">{{ $sedeQr->nombre_sede }}</div>
+            <div class="text-xs text-gray-500">{{ $sedeQr->ubicacion }}</div>
+            <code class="inline-block mt-1.5 text-xs font-bold bg-[#E8F3EA] text-[#197328] px-3 py-1 rounded-lg">{{ $sedeQr->codigo_qr_fijo }}</code>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+            <button type="button" onclick="descargarCartelQRSede()" class="py-2.5 rounded-xl bg-[#197328] text-white text-xs font-bold">
+                <i class="fa-solid fa-download mr-1"></i>Descargar PNG
+            </button>
+            <button type="button" onclick="document.getElementById('modal-cartel-sede').classList.add('hidden')" class="py-2.5 rounded-xl bg-[#373A39] text-white text-xs font-bold">
+                Cerrar
+            </button>
+        </div>
+    </div>
+</div>
+@endif
+
 <!-- Modal Carnet QR Individual -->
 <div id="modal-carnet-qr" class="hidden fixed inset-0 z-40 bg-black/50 flex items-center justify-center p-4">
     <div class="bg-white rounded-2xl max-w-sm w-full p-6 text-center space-y-4">
         <div class="flex justify-center"><x-donsen-logo :width="135" /></div>
-        <div id="carnet-qr-box" class="flex justify-center p-3 border rounded-xl"></div>
+        <div id="carnet-qr-box" class="flex justify-center p-4 bg-white border rounded-xl"></div>
         <div>
             <div id="carnet-nombre" class="text-base font-extrabold text-[#373A39]"></div>
             <div id="carnet-cargo" class="text-xs text-[#197328] font-bold"></div>
@@ -1722,10 +1751,31 @@ LARAVEL_FILE,
 </div>
 
 <script>
+    const urlSedeQr = '{{ url("/marcaje-qr?sede=" . ($sedeQr->codigo_qr_fijo ?? "DONSEN-SEDE-CCS-2026")) }}';
+
     document.addEventListener('DOMContentLoaded', () => {
+        if (typeof QRCode === 'undefined') return;
         const sedeBox = document.getElementById('qr-sede-preview');
-        if (sedeBox && typeof QRCode !== 'undefined') {
-            new QRCode(sedeBox, { text: '{{ url("/marcaje-qr?sede=" . ($sedeQr->codigo_qr_fijo ?? "DONSEN-SEDE-CCS-2026")) }}', width: 92, height: 92, colorDark: '#197328' });
+        if (sedeBox) {
+            new QRCode(sedeBox, {
+                text: urlSedeQr,
+                width: 104,
+                height: 104,
+                colorDark: '#000000',
+                colorLight: '#FFFFFF',
+                correctLevel: QRCode.CorrectLevel.M
+            });
+        }
+        const sedeHdBox = document.getElementById('qr-sede-hd');
+        if (sedeHdBox) {
+            new QRCode(sedeHdBox, {
+                text: urlSedeQr,
+                width: 240,
+                height: 240,
+                colorDark: '#000000',
+                colorLight: '#FFFFFF',
+                correctLevel: QRCode.CorrectLevel.M
+            });
         }
     });
 
@@ -1738,11 +1788,49 @@ LARAVEL_FILE,
     }
 
     function descargarCartelQRSede() {
-        const canvas = document.querySelector('#qr-sede-preview canvas');
-        if (!canvas) return;
+        const qrCanvas = document.querySelector('#qr-sede-hd canvas') || document.querySelector('#qr-sede-preview canvas');
+        if (!qrCanvas) return;
+
+        // Generar cartel imprimible HD (480x620) con amplio margen blanco para lectura instantánea
+        const poster = document.createElement('canvas');
+        poster.width = 480;
+        poster.height = 620;
+        const ctx = poster.getContext('2d');
+
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, 480, 620);
+        ctx.strokeStyle = '#197328';
+        ctx.lineWidth = 12;
+        ctx.strokeRect(6, 6, 468, 608);
+
+        ctx.fillStyle = '#373A39';
+        ctx.font = 'italic 900 48px Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('donsen®', 240, 74);
+
+        ctx.fillStyle = '#197328';
+        ctx.fillRect(110, 88, 260, 8);
+        ctx.fillRect(90, 100, 280, 10);
+
+        ctx.fillStyle = '#197328';
+        ctx.font = 'bold 16px Arial, sans-serif';
+        ctx.fillText('CONTROL DE ASISTENCIA - ENTRADA SEDE', 240, 138);
+
+        // Dibujar QR de alta resolución con margen blanco alrededor
+        ctx.drawImage(qrCanvas, 90, 165, 300, 300);
+
+        ctx.fillStyle = '#373A39';
+        ctx.font = 'bold 16px monospace';
+        ctx.fillText('{{ $sedeQr->codigo_qr_fijo ?? "DONSEN-SEDE-CCS-2026" }}', 240, 505);
+
+        ctx.fillStyle = '#4B5563';
+        ctx.font = '14px Arial, sans-serif';
+        ctx.fillText('Escanee este código con su teléfono al entrar o salir', 240, 540);
+        ctx.fillText('{{ $sedeQr->nombre_sede ?? "Sede Principal Caracas" }}', 240, 565);
+
         const link = document.createElement('a');
-        link.download = 'QR_Fisico_Entrada_Donsen.png';
-        link.href = canvas.toDataURL('image/png');
+        link.download = 'Cartel_QR_Entrada_Donsen_HD.png';
+        link.href = poster.toDataURL('image/png');
         link.click();
     }
 
@@ -1753,7 +1841,7 @@ LARAVEL_FILE,
         document.getElementById('carnet-token').textContent = token;
         const box = document.getElementById('carnet-qr-box');
         box.innerHTML = '';
-        new QRCode(box, { text: token, width: 170, height: 170, colorDark: '#373A39' });
+        new QRCode(box, { text: token, width: 200, height: 200, colorDark: '#000000', colorLight: '#FFFFFF', correctLevel: QRCode.CorrectLevel.M });
         document.getElementById('modal-carnet-qr').classList.remove('hidden');
     }
 </script>
@@ -1780,8 +1868,11 @@ LARAVEL_FILE,
 
     <!-- PASO 1: QR DE LA ENTRADA -->
     <div id="paso-1-card" class="{{ $sedePrevalidada ? 'hidden' : '' }} bg-white p-6 rounded-2xl border border-gray-200 space-y-4">
-        <h2 class="text-base font-bold text-[#373A39]">1. Escanear QR de la Entrada de Donsen</h2>
-        <p class="text-xs text-gray-500">Apunte la cámara de su celular al cartel QR ubicado en la entrada principal.</p>
+        <h2 class="text-base font-bold text-[#373A39]">1. Escanear QR Fijo de la Entrada de Donsen</h2>
+        <p class="text-xs text-gray-500">Apunte la cámara de su celular al cartel QR físico ubicado en la entrada principal (<code class="font-bold text-[#197328]">{{ $sedeQr->codigo_qr_fijo ?? 'DONSEN-SEDE-CCS-2026' }}</code>).</p>
+
+        <div id="paso-1-error" class="hidden p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold"></div>
+
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             <button type="button" onclick="iniciarCamara('sede')" class="py-3 px-4 rounded-xl bg-[#373A39] text-white text-xs font-bold">
                 <i class="fa-solid fa-camera mr-1.5"></i>Escanear QR Entrada
@@ -1792,16 +1883,21 @@ LARAVEL_FILE,
         </div>
     </div>
 
-    <div id="visor-camara-card" class="hidden bg-white p-4 rounded-2xl border-2 border-[#197328] space-y-2">
-        <div id="qr-reader" class="w-full rounded-xl overflow-hidden"></div>
-        <button type="button" onclick="detenerCamara()" class="w-full py-2 rounded-xl bg-red-50 text-red-600 text-xs font-bold">Cerrar Cámara</button>
+    <div id="visor-camara-card" class="hidden bg-white p-4 rounded-2xl border-2 border-[#197328] space-y-2.5">
+        <div id="camara-estado-msg" class="text-center text-xs font-bold text-[#197328]">
+            <i class="fa-solid fa-camera mr-1"></i>Enfoque el código QR dentro del recuadro...
+        </div>
+        <div id="qr-reader" class="w-full rounded-xl overflow-hidden bg-black min-h-[260px]"></div>
+        <button type="button" onclick="detenerCamara()" class="w-full py-2.5 rounded-xl bg-red-50 text-red-600 text-xs font-bold">Cerrar Cámara</button>
     </div>
 
     <!-- PASO 2: IDENTIFICACIÓN PERSONAL + BLOQUEO DE DISPOSITIVO -->
     <div id="paso-2-card" class="{{ $sedePrevalidada ? '' : 'hidden' }} bg-white p-6 rounded-2xl border border-gray-200 space-y-4">
-        <div class="p-3 rounded-xl bg-[#E8F3EA] text-[#197328] text-xs font-bold flex items-center justify-between">
+        <div class="p-3 rounded-xl bg-[#E8F3EA] text-[#197328] text-xs font-bold flex items-center justify-between gap-2">
             <span><i class="fa-solid fa-check-circle mr-1"></i>Sede Verificada: <span id="sede-activa-label">{{ $sedePrevalidada->codigo_qr_fijo ?? '' }}</span></span>
-            <span class="text-[10px] uppercase bg-white px-2 py-0.5 rounded">Móvil Protegido</span>
+            <button type="button" onclick="reiniciarPasoSede()" class="text-[11px] underline text-[#373A39] hover:text-rose-600 shrink-0">
+                Cambiar QR
+            </button>
         </div>
 
         <h2 class="text-base font-bold text-[#373A39]">2. Confirme su Identidad Personal</h2>
@@ -1849,11 +1945,11 @@ LARAVEL_FILE,
 </div>
 
 <script>
+    const sedeCodigoOficial = @json($sedeQr->codigo_qr_fijo ?? 'DONSEN-SEDE-CCS-2026');
     let qrSedeValidado = @json($sedePrevalidada->codigo_qr_fijo ?? null);
     let html5Qr = null;
     let gpsCoords = { lat: null, lng: null };
 
-    // Solicitar ubicación GPS real apenas abre la terminal móvil
     function solicitarUbicacionGPS() {
         const pill = document.getElementById('gps-status-pill');
         const txt = document.getElementById('gps-status-text');
@@ -1880,7 +1976,6 @@ LARAVEL_FILE,
 
     document.addEventListener('DOMContentLoaded', solicitarUbicacionGPS);
 
-    // Generar o recuperar el identificador único permanente de este teléfono móvil
     function obtenerDeviceToken() {
         let token = localStorage.getItem('donsen_device_token');
         if (!token) {
@@ -1894,34 +1989,83 @@ LARAVEL_FILE,
     }
 
     function validarSede(codigo) {
-        let limpio = codigo.trim();
+        let limpio = (codigo || '').trim();
         if (limpio.includes('sede=')) {
             try {
                 const u = new URL(limpio);
                 limpio = u.searchParams.get('sede') || limpio;
             } catch (e) {}
         }
+        limpio = limpio.toUpperCase();
+
+        const errBox = document.getElementById('paso-1-error');
+        if (limpio !== sedeCodigoOficial.toUpperCase()) {
+            errBox.classList.remove('hidden');
+            if (limpio.startsWith('DONSEN-EMP-')) {
+                errBox.textContent = 'Escaneaste un Carnet Individual de Empleado (' + limpio + '). En el Paso 1 debes escanear el QR Fijo de la Entrada de Donsen (' + sedeCodigoOficial + ').';
+            } else {
+                errBox.textContent = 'Código QR de sede incorrecto (' + limpio + '). Escanee el QR oficial ubicado en la entrada de Donsen (' + sedeCodigoOficial + ').';
+            }
+            return;
+        }
+
+        errBox.classList.add('hidden');
         qrSedeValidado = limpio;
         document.getElementById('sede-activa-label').textContent = qrSedeValidado;
         document.getElementById('paso-1-card').classList.add('hidden');
         document.getElementById('paso-2-card').classList.remove('hidden');
+        document.getElementById('resultado-marcaje-box').classList.add('hidden');
+    }
+
+    function reiniciarPasoSede() {
+        detenerCamara();
+        qrSedeValidado = null;
+        document.getElementById('paso-1-error').classList.add('hidden');
+        document.getElementById('paso-2-card').classList.add('hidden');
+        document.getElementById('resultado-marcaje-box').classList.add('hidden');
+        document.getElementById('paso-1-card').classList.remove('hidden');
     }
 
     async function iniciarCamara(objetivo) {
         await detenerCamara();
-        document.getElementById('visor-camara-card').classList.remove('hidden');
-        html5Qr = new Html5Qrcode('qr-reader');
+        const visorCard = document.getElementById('visor-camara-card');
+        const msgEl = document.getElementById('camara-estado-msg');
+        visorCard.classList.remove('hidden');
+        msgEl.textContent = objetivo === 'sede'
+            ? 'Paso 1: Apunte la cámara al QR Fijo de la Sede Donsen...'
+            : 'Paso 2: Apunte la cámara al Carnet QR del Empleado...';
+
+        // Activar aceleración nativa de lectura de códigos en Android/Chrome
+        html5Qr = new Html5Qrcode('qr-reader', {
+            experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+            verbose: false
+        });
+
+        const qrboxFunc = (viewfinderWidth, viewfinderHeight) => {
+            const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+            const size = Math.max(180, Math.floor(minEdge * 0.75));
+            return { width: size, height: size };
+        };
+
         try {
-            await html5Qr.start({ facingMode: 'environment' }, { fps: 10, qrbox: 220 }, (texto) => {
-                detenerCamara();
-                if (objetivo === 'sede') {
-                    validarSede(texto);
-                } else {
-                    enviarMarcajeAjax(texto, false);
-                }
-            });
+            await html5Qr.start(
+                { facingMode: 'environment' },
+                { fps: 15, qrbox: qrboxFunc },
+                (texto) => {
+                    detenerCamara();
+                    if (objetivo === 'sede') {
+                        validarSede(texto);
+                    } else {
+                        enviarMarcajeAjax(texto, false);
+                    }
+                },
+                () => {}
+            );
         } catch (e) {
             detenerCamara();
+            const errBox = document.getElementById('paso-1-error');
+            errBox.classList.remove('hidden');
+            errBox.textContent = 'No se pudo abrir la cámara en el navegador. Verifique los permisos o escanee el QR de la entrada directamente con la cámara normal de su teléfono.';
         }
     }
 

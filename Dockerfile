@@ -13,16 +13,20 @@ COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
 WORKDIR /var/www/html
 
-RUN composer create-project --prefer-dist laravel/laravel . "11.*"
+RUN composer config --global policy.advisories.block false || true
+RUN composer create-project --prefer-dist laravel/laravel .
 
 COPY sistema_asistencia_donsen_laravel.php /var/www/html/sistema_asistencia_donsen_laravel.php
-RUN php /var/www/html/sistema_asistencia_donsen_laravel.php && rm /var/www/html/sistema_asistencia_donsen_laravel.php
 
-RUN mkdir -p /var/www/html/app/Providers && printf '<?php\nnamespace App\Providers;\nuse Illuminate\Support\ServiceProvider;\nuse Illuminate\Support\Facades\URL;\nclass AppServiceProvider extends ServiceProvider {\n    public function register(): void {}\n    public function boot(): void {\n        if (config("app.env") === "production") {\n            URL::forceScheme("https");\n        }\n    }\n}\n' > /var/www/html/app/Providers/AppServiceProvider.php
+RUN php /var/www/html/sistema_asistencia_donsen_laravel.php
+
+RUN php -r 'file_put_contents("app/Providers/AppServiceProvider.php", "<?php\nnamespace App\Providers;\nuse Illuminate\Support\ServiceProvider;\nuse Illuminate\Support\Facades\URL;\nclass AppServiceProvider extends ServiceProvider {\n    public function register(): void {}\n    public function boot(): void { if (config("app.env") === "production") { URL::forceScheme("https"); } }\n}\n");'
+
+RUN php -r 'file_put_contents("/usr/local/bin/seed-check.php", "<?php\nchdir("/var/www/html");\nrequire "vendor/autoload.php";\n$app = require "bootstrap/app.php";\n$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();\nif (\App\Models\User::count() === 0) {\n    \Illuminate\Support\Facades\Artisan::call("db:seed", ["--force" => true]);\n}\n");'
 
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache && chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
 
-RUN printf '#!/bin/bash\nset -e\ncp -n .env.example .env || true\nphp artisan key:generate --force\nphp artisan config:clear\nphp artisan migrate --force\nphp artisan db:seed --force || true\napache2-foreground\n' > /usr/local/bin/start-donsen.sh && chmod +x /usr/local/bin/start-donsen.sh
+RUN printf '#!/bin/sh\nset -e\ncp -n .env.example .env || true\nphp artisan key:generate --force\nsed -i "s/80/${PORT:-80}/g" /etc/apache2/sites-available/000-default.conf /etc/apache2/ports.conf\nphp artisan config:clear\nphp artisan migrate --force\nphp /usr/local/bin/seed-check.php\nexec apache2-foreground\n' > /usr/local/bin/start-donsen.sh && chmod +x /usr/local/bin/start-donsen.sh
 
 EXPOSE 80
 

@@ -17,16 +17,15 @@ RUN composer config --global policy.advisories.block false || true
 RUN composer create-project --prefer-dist laravel/laravel .
 
 COPY sistema_asistencia_donsen_laravel.php /var/www/html/sistema_asistencia_donsen_laravel.php
-
 RUN php /var/www/html/sistema_asistencia_donsen_laravel.php
 
-RUN php -r 'file_put_contents("app/Providers/AppServiceProvider.php", "<?php\nnamespace App\Providers;\nuse Illuminate\Support\ServiceProvider;\nuse Illuminate\Support\Facades\URL;\nclass AppServiceProvider extends ServiceProvider {\n    public function register(): void {}\n    public function boot(): void { if (config("app.env") === "production") { URL::forceScheme("https"); } }\n}\n");'
+RUN printf '%s\n' '<?php' 'namespace App\Providers;' 'use Illuminate\Support\ServiceProvider;' 'use Illuminate\Support\Facades\URL;' 'class AppServiceProvider extends ServiceProvider {' '    public function register(): void {}' '    public function boot(): void { if (env("APP_ENV") === "production") { URL::forceScheme("https"); } }' '}' > app/Providers/AppServiceProvider.php
 
-RUN php -r 'file_put_contents("/usr/local/bin/seed-check.php", "<?php\nchdir("/var/www/html");\nrequire "vendor/autoload.php";\n$app = require "bootstrap/app.php";\n$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();\nif (\App\Models\User::count() === 0) {\n    \Illuminate\Support\Facades\Artisan::call("db:seed", ["--force" => true]);\n}\n");'
+RUN printf '%s\n' '<?php' 'chdir("/var/www/html");' 'require "vendor/autoload.php";' '$app = require "bootstrap/app.php";' '$app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();' 'if (\App\Models\User::count() === 0) {' '    \Illuminate\Support\Facades\Artisan::call("db:seed", ["--force" => true]);' '}' > /usr/local/bin/seed-check.php
+
+RUN printf '%s\n' '#!/usr/bin/env bash' 'set -e' 'cd /var/www/html' 'sed -i "/^DB_/d" .env || true' 'if [ -z "$APP_KEY" ]; then' '  export APP_KEY=$(php artisan key:generate --show)' 'fi' 'php artisan config:clear' 'php artisan migrate --force' 'php /usr/local/bin/seed-check.php' 'sed -i "s/80/${PORT:-80}/g" /etc/apache2/sites-available/000-default.conf /etc/apache2/ports.conf' 'exec apache2-foreground' > /usr/local/bin/start-donsen.sh && chmod +x /usr/local/bin/start-donsen.sh
 
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache && chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
-
-RUN printf '#!/bin/sh\nset -e\ncp -n .env.example .env || true\nphp artisan key:generate --force\nsed -i "s/80/${PORT:-80}/g" /etc/apache2/sites-available/000-default.conf /etc/apache2/ports.conf\nphp artisan config:clear\nphp artisan migrate --force\nphp /usr/local/bin/seed-check.php\nexec apache2-foreground\n' > /usr/local/bin/start-donsen.sh && chmod +x /usr/local/bin/start-donsen.sh
 
 EXPOSE 80
 

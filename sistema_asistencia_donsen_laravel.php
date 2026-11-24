@@ -160,6 +160,50 @@ return new class extends Migration
 LARAVEL_FILE,
 
     // =========================================================================
+    // 1C. MIGRACIÓN GEOCERCA GPS POR SEDE Y AUDITORÍA DE MAPA EN ASISTENCIAS
+    // =========================================================================
+    'database/migrations/2026_01_03_000003_add_gps_geofence_to_sede_and_asistencias.php' => <<<'LARAVEL_FILE'
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('sede_qrs', function (Blueprint $table) {
+            if (!Schema::hasColumn('sede_qrs', 'latitud')) {
+                $table->decimal('latitud', 10, 7)->nullable()->after('ubicacion');
+                $table->decimal('longitud', 10, 7)->nullable()->after('latitud');
+                $table->integer('radio_metros')->default(120)->after('longitud');
+            }
+        });
+
+        Schema::table('asistencias', function (Blueprint $table) {
+            if (!Schema::hasColumn('asistencias', 'latitud_marcaje')) {
+                $table->decimal('latitud_marcaje', 10, 7)->nullable()->after('estatus');
+                $table->decimal('longitud_marcaje', 10, 7)->nullable()->after('latitud_marcaje');
+                $table->integer('distancia_metros')->nullable()->after('longitud_marcaje');
+            }
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('sede_qrs', function (Blueprint $table) {
+            $table->dropColumn(['latitud', 'longitud', 'radio_metros']);
+        });
+
+        Schema::table('asistencias', function (Blueprint $table) {
+            $table->dropColumn(['latitud_marcaje', 'longitud_marcaje', 'distancia_metros']);
+        });
+    }
+};
+LARAVEL_FILE,
+
+    // =========================================================================
     // 2. SEEDER CON LA PLANTILLA CENSAL DE 9 TRABAJADORES DE DONSEN
     // =========================================================================
     'database/seeders/DatabaseSeeder.php' => <<<'LARAVEL_FILE'
@@ -184,7 +228,7 @@ class DatabaseSeeder extends Seeder
         User::updateOrCreate(
             ['email' => 'director@donsen.com'],
             [
-                'name' => 'Carlos Mendoza',
+                'name' => 'Domenico Ferro',
                 'password' => Hash::make('password123'),
                 'rol' => 'Director General',
             ]
@@ -234,11 +278,14 @@ class DatabaseSeeder extends Seeder
             'nombre_sede' => 'Sede Principal Caracas',
             'codigo_qr_fijo' => 'DONSEN-SEDE-CCS-2026',
             'ubicacion' => 'Entrada Principal - Área Administrativa y Almacén',
+            'latitud' => 10.4806000,
+            'longitud' => -66.9036000,
+            'radio_metros' => 120,
             'activo' => true,
         ]);
 
         $plantilla = [
-            ['V-15.420.110', 'Carlos Mendoza', 'Director General', $dir->id, $turnoAdmin->id, 'DONSEN-EMP-001-15420110'],
+            ['V-15.420.110', 'Domenico Ferro', 'Director General', $dir->id, $turnoAdmin->id, 'DONSEN-EMP-001-15420110'],
             ['V-19.834.512', 'María Fernanda Gómez', 'Administradora', $adm->id, $turnoAdmin->id, 'DONSEN-EMP-002-19834512'],
             ['V-21.309.874', 'Daniela Rodríguez', 'Administradora', $adm->id, $turnoAdmin->id, 'DONSEN-EMP-003-21309874'],
             ['V-17.652.390', 'Roberto Castillo', 'Jefe de Almacén', $alm->id, $turnoAlmacen->id, 'DONSEN-EMP-004-17652390'],
@@ -402,11 +449,17 @@ class SedeQr extends Model
         'nombre_sede',
         'codigo_qr_fijo',
         'ubicacion',
+        'latitud',
+        'longitud',
+        'radio_metros',
         'activo',
     ];
 
     protected $casts = [
         'activo' => 'boolean',
+        'latitud' => 'float',
+        'longitud' => 'float',
+        'radio_metros' => 'integer',
     ];
 
     public function asistencias(): HasMany
@@ -419,6 +472,29 @@ class SedeQr extends Model
         return self::where('codigo_qr_fijo', trim($codigo))
                    ->where('activo', true)
                    ->first();
+    }
+
+    /**
+     * Fórmula de Haversine: calcula la distancia exacta en metros entre
+     * las coordenadas físicas de la sede Donsen y el teléfono del trabajador.
+     */
+    public function calcularDistanciaMetros(float $latUsuario, float $lngUsuario): int
+    {
+        if ($this->latitud === null || $this->longitud === null) {
+            return 0;
+        }
+
+        $radioTierra = 6371000; // metros
+        $dLat = deg2rad($latUsuario - $this->latitud);
+        $dLng = deg2rad($lngUsuario - $this->longitud);
+
+        $a = sin($dLat / 2) * sin($dLat / 2)
+           + cos(deg2rad($this->latitud)) * cos(deg2rad($latUsuario))
+           * sin($dLng / 2) * sin($dLng / 2);
+
+        $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
+
+        return (int) round($radioTierra * $c);
     }
 }
 LARAVEL_FILE,
@@ -495,6 +571,9 @@ class Asistencia extends Model
         'hora_entrada',
         'hora_salida',
         'estatus',
+        'latitud_marcaje',
+        'longitud_marcaje',
+        'distancia_metros',
     ];
 
     public function empleado(): BelongsTo
@@ -729,6 +808,22 @@ class EmpleadoController extends Controller
         return redirect()->route('empleados.index')
                          ->with('success', 'Teléfono desvinculado para ' . $empleado->nombres_apellidos . '. Podrá registrar un nuevo equipo en su próximo escaneo.');
     }
+
+    public function updateSedeUbicacion(Request $request, SedeQr $sede)
+    {
+        $datos = $request->validate([
+            'nombre_sede' => ['required', 'string', 'max:100'],
+            'ubicacion' => ['required', 'string', 'max:150'],
+            'latitud' => ['required', 'numeric', 'between:-90,90'],
+            'longitud' => ['required', 'numeric', 'between:-180,180'],
+            'radio_metros' => ['required', 'integer', 'min:20', 'max:5000'],
+        ]);
+
+        $sede->update($datos);
+
+        return redirect()->route('empleados.index')
+                         ->with('success', 'Coordenadas GPS y radio de geocerca actualizados para ' . $sede->nombre_sede . '.');
+    }
 }
 LARAVEL_FILE,
 
@@ -772,6 +867,8 @@ class AsistenciaController extends Controller
             'identificador' => ['required', 'string'],
             'device_token' => ['required', 'string', 'min:10', 'max:100'],
             'device_info' => ['nullable', 'string', 'max:120'],
+            'latitud' => ['nullable', 'numeric', 'between:-90,90'],
+            'longitud' => ['nullable', 'numeric', 'between:-180,180'],
             'hora_simulada' => ['nullable', 'date_format:H:i'],
         ]);
 
@@ -790,6 +887,39 @@ class AsistenciaController extends Controller
                 'titulo' => 'QR de Sede Inválido',
                 'mensaje' => 'El código institucional escaneado no pertenece a una sede activa de Donsen.',
             ], 400);
+        }
+
+        $esAdminEnPruebas = auth()->check() && $request->boolean('modo_prueba_admin');
+
+        // =====================================================================
+        // VALIDACIÓN DE GEOCERCA GPS EN MAPA (EVITA QUE SE PASEN EL QR POR FOTO)
+        // =====================================================================
+        $latitud = $request->filled('latitud') ? (float) $request->latitud : null;
+        $longitud = $request->filled('longitud') ? (float) $request->longitud : null;
+        $distanciaMetros = null;
+
+        if (!$esAdminEnPruebas && $sede->latitud !== null && $sede->longitud !== null) {
+            if ($latitud === null || $longitud === null) {
+                return response()->json([
+                    'ok' => false,
+                    'tipo' => 'error',
+                    'badge' => 'UBICACIÓN GPS REQUERIDA',
+                    'mensaje' => 'Debe activar el GPS y permitir el acceso a su ubicación en el navegador para verificar que se encuentra físicamente en la sede de Donsen.',
+                ], 422);
+            }
+
+            $distanciaMetros = $sede->calcularDistanciaMetros($latitud, $longitud);
+
+            if ($distanciaMetros > $sede->radio_metros) {
+                return response()->json([
+                    'ok' => false,
+                    'tipo' => 'error',
+                    'badge' => 'FUERA DEL RANGO DE LA SEDE (GPS)',
+                    'mensaje' => 'Ubicación rechazada: se encuentra a ' . number_format($distanciaMetros, 0, ',', '.') . ' metros de ' . $sede->nombre_sede . ' (radio máximo permitido: ' . $sede->radio_metros . ' m). No se permite marcar asistencia fuera de la empresa.',
+                ], 403);
+            }
+        } elseif ($latitud !== null && $longitud !== null && $sede->latitud !== null) {
+            $distanciaMetros = $sede->calcularDistanciaMetros($latitud, $longitud);
         }
 
         // Buscar empleado por Token QR individual O por Cédula de Identidad
@@ -828,7 +958,6 @@ class AsistenciaController extends Controller
         // VALIDACIÓN ANTI-SUPLANTACIÓN (1 TELÉFONO = 1 TRABAJADOR)
         // =====================================================================
         $deviceToken = trim($request->device_token);
-        $esAdminEnPruebas = auth()->check() && $request->boolean('modo_prueba_admin');
 
         if (!$esAdminEnPruebas) {
             // 1. Verificar si este teléfono ya pertenece a OTRO compañero
@@ -887,8 +1016,13 @@ class AsistenciaController extends Controller
                     'sede_qr_id' => $sede->id,
                     'hora_entrada' => $horaActual->format('H:i:s'),
                     'estatus' => $estatus,
+                    'latitud_marcaje' => $latitud,
+                    'longitud_marcaje' => $longitud,
+                    'distancia_metros' => $distanciaMetros,
                 ]
             );
+
+            $textoGps = $distanciaMetros !== null ? " • Ubicación GPS verificada ({$distanciaMetros}m de la sede)." : '.';
 
             return response()->json([
                 'ok' => true,
@@ -898,9 +1032,10 @@ class AsistenciaController extends Controller
                 'cargo' => $empleado->cargo . ' • ' . $empleado->departamento->nombre_departamento,
                 'hora' => $horaActual->format('H:i'),
                 'estatus' => $estatus,
-                'mensaje' => $estatus === 'Retardo'
-                    ? 'Entrada registrada fuera del margen de tolerancia (' . $empleado->horario->tolerancia_min . ' min). Dispositivo verificado.'
-                    : 'Entrada registrada puntualmente. Dispositivo móvil vinculado y verificado.',
+                'mapa_url' => ($latitud && $longitud) ? "https://www.google.com/maps?q={$latitud},{$longitud}" : null,
+                'mensaje' => ($estatus === 'Retardo'
+                    ? 'Entrada registrada fuera del margen de tolerancia (' . $empleado->horario->tolerancia_min . ' min)'
+                    : 'Entrada registrada puntualmente') . $textoGps,
             ]);
         }
 
@@ -931,6 +1066,7 @@ class AsistenciaController extends Controller
                 'cargo' => $empleado->cargo . ' • ' . $empleado->departamento->nombre_departamento,
                 'hora' => $horaActual->format('H:i'),
                 'estatus' => $registro->estatus,
+                'mapa_url' => ($latitud && $longitud) ? "https://www.google.com/maps?q={$latitud},{$longitud}" : null,
                 'mensaje' => 'Salida registrada. Total laborado hoy: ' . $registro->horas_laboradas,
             ]);
         }
@@ -1088,6 +1224,7 @@ Route::middleware(['auth'])->group(function () {
     Route::patch('/empleados/{empleado}/estado', [EmpleadoController::class, 'toggleEstado'])->name('empleados.toggle');
     Route::patch('/empleados/{empleado}/reset-device', [EmpleadoController::class, 'resetDevice'])->name('empleados.resetDevice');
     Route::delete('/empleados/{empleado}', [EmpleadoController::class, 'destroy'])->name('empleados.destroy');
+    Route::put('/sede/{sede}/ubicacion', [EmpleadoController::class, 'updateSedeUbicacion'])->name('sede.ubicacion');
 
     // Consultas y Reportes Gerenciales (Excel CSV y PDF)
     Route::get('/reportes', [ReporteController::class, 'index'])->name('reportes.index');
@@ -1408,15 +1545,62 @@ LARAVEL_FILE,
     </div>
 
     @if($sedeQr)
-    <div class="bg-white p-5 rounded-2xl border border-gray-200 flex flex-col sm:flex-row items-center justify-between gap-4">
-        <div class="flex items-center gap-4">
-            <div id="qr-sede-preview" class="p-2 bg-white border border-gray-200 rounded-xl"></div>
-            <div>
-                <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#E8F3EA] text-[#197328]">QR Fijo de Entrada Activo (URL Directa)</span>
-                <h2 class="text-base font-bold text-[#373A39] mt-1">{{ $sedeQr->nombre_sede }}</h2>
-                <p class="text-xs text-gray-500">{{ $sedeQr->ubicacion }} • Enlace QR: <code class="font-bold text-[#197328]">{{ url('/marcaje-qr?sede=' . $sedeQr->codigo_qr_fijo) }}</code></p>
+    <div class="bg-white p-5 rounded-2xl border border-gray-200 space-y-4">
+        <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div class="flex items-center gap-4">
+                <div id="qr-sede-preview" class="p-2 bg-white border border-gray-200 rounded-xl shrink-0"></div>
+                <div>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#E8F3EA] text-[#197328]">QR Fijo Físico + Geocerca GPS</span>
+                        @if($sedeQr->latitud && $sedeQr->longitud)
+                            <a href="https://www.google.com/maps?q={{ $sedeQr->latitud }},{{ $sedeQr->longitud }}" target="_blank"
+                               class="text-xs font-bold text-blue-600 hover:underline">
+                                <i class="fa-solid fa-location-dot mr-1"></i>Ver Sede en Google Maps
+                            </a>
+                        @endif
+                    </div>
+                    <h2 class="text-base font-bold text-[#373A39] mt-1">{{ $sedeQr->nombre_sede }} (Radio permitido: {{ $sedeQr->radio_metros }}m)</h2>
+                    <p class="text-xs text-gray-500">{{ $sedeQr->ubicacion }} • Enlace QR: <code class="font-bold text-[#197328]">{{ url('/marcaje-qr?sede=' . $sedeQr->codigo_qr_fijo) }}</code></p>
+                </div>
+            </div>
+            <div class="flex flex-wrap gap-2">
+                <button type="button" onclick="descargarCartelQRSede()"
+                        class="px-3.5 py-2 rounded-xl bg-[#373A39] hover:bg-black text-white text-xs font-bold">
+                    <i class="fa-solid fa-download mr-1.5"></i>Descargar QR Físico (PNG)
+                </button>
+                <button type="button" onclick="document.getElementById('form-gps-sede').classList.toggle('hidden')"
+                        class="px-3.5 py-2 rounded-xl bg-[#E8F3EA] text-[#197328] text-xs font-bold">
+                    <i class="fa-solid fa-map-location-dot mr-1.5"></i>Calibrar GPS Sede
+                </button>
             </div>
         </div>
+
+        <form id="form-gps-sede" method="POST" action="{{ route('sede.ubicacion', $sedeQr) }}" class="hidden pt-4 border-t border-gray-100 grid grid-cols-1 sm:grid-cols-6 gap-3 items-end">
+            @csrf @method('PUT')
+            <input type="hidden" name="nombre_sede" value="{{ $sedeQr->nombre_sede }}">
+            <input type="hidden" name="ubicacion" value="{{ $sedeQr->ubicacion }}">
+            <div class="sm:col-span-2">
+                <label class="block text-[11px] font-bold text-gray-500 mb-1">Latitud Sede</label>
+                <input type="text" id="input-sede-lat" name="latitud" value="{{ $sedeQr->latitud }}" required class="w-full px-3 py-2 rounded-xl border text-xs font-mono">
+            </div>
+            <div class="sm:col-span-2">
+                <label class="block text-[11px] font-bold text-gray-500 mb-1">Longitud Sede</label>
+                <input type="text" id="input-sede-lng" name="longitud" value="{{ $sedeQr->longitud }}" required class="w-full px-3 py-2 rounded-xl border text-xs font-mono">
+            </div>
+            <div>
+                <label class="block text-[11px] font-bold text-gray-500 mb-1">Radio (metros)</label>
+                <input type="number" name="radio_metros" value="{{ $sedeQr->radio_metros }}" min="20" max="5000" required class="w-full px-3 py-2 rounded-xl border text-xs">
+            </div>
+            <div class="flex gap-1.5">
+                <button type="button" onclick="capturarUbicacionActualSede()" title="Tomar GPS de este dispositivo"
+                        class="px-3 py-2 rounded-xl bg-blue-600 text-white text-xs font-bold">
+                    <i class="fa-solid fa-crosshairs"></i>
+                </button>
+                <button type="submit" class="flex-1 py-2 px-3 rounded-xl bg-[#197328] text-white text-xs font-bold">
+                    Guardar
+                </button>
+            </div>
+        </form>
     </div>
     @endif
 
@@ -1545,6 +1729,23 @@ LARAVEL_FILE,
         }
     });
 
+    function capturarUbicacionActualSede() {
+        if (!navigator.geolocation) return;
+        navigator.geolocation.getCurrentPosition((pos) => {
+            document.getElementById('input-sede-lat').value = pos.coords.latitude.toFixed(7);
+            document.getElementById('input-sede-lng').value = pos.coords.longitude.toFixed(7);
+        }, () => {}, { enableHighAccuracy: true });
+    }
+
+    function descargarCartelQRSede() {
+        const canvas = document.querySelector('#qr-sede-preview canvas');
+        if (!canvas) return;
+        const link = document.createElement('a');
+        link.download = 'QR_Fisico_Entrada_Donsen.png';
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+    }
+
     function mostrarCarnetQR(nombre, cargo, cedula, token) {
         document.getElementById('carnet-nombre').textContent = nombre;
         document.getElementById('carnet-cargo').textContent = cargo;
@@ -1567,10 +1768,14 @@ LARAVEL_FILE,
 <div class="max-w-lg mx-auto space-y-5">
     <div class="bg-white p-5 rounded-2xl border border-gray-200 text-center">
         <span class="px-3 py-1 rounded-full bg-[#E8F3EA] text-[#197328] text-xs font-bold">
-            <i class="fa-solid fa-shield-halved mr-1"></i>Seguridad Anti-Suplantación Activa • Donsen
+            <i class="fa-solid fa-location-dot mr-1"></i>Geocerca GPS + Dispositivo Único • Donsen
         </span>
         <h1 class="text-xl font-extrabold text-[#373A39] mt-2">Registro de Asistencia Laboral</h1>
-        <p class="text-xs text-gray-500 mt-1">1 teléfono personal = 1 trabajador autorizado</p>
+        <p class="text-xs text-gray-500 mt-1">Validación física en sede mediante GPS en mapa y teléfono vinculado</p>
+        <div id="gps-status-pill" class="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-50 text-amber-700 text-[11px] font-semibold">
+            <i class="fa-solid fa-satellite-dish"></i>
+            <span id="gps-status-text">Obteniendo coordenadas GPS del mapa...</span>
+        </div>
     </div>
 
     <!-- PASO 1: QR DE LA ENTRADA -->
@@ -1646,6 +1851,34 @@ LARAVEL_FILE,
 <script>
     let qrSedeValidado = @json($sedePrevalidada->codigo_qr_fijo ?? null);
     let html5Qr = null;
+    let gpsCoords = { lat: null, lng: null };
+
+    // Solicitar ubicación GPS real apenas abre la terminal móvil
+    function solicitarUbicacionGPS() {
+        const pill = document.getElementById('gps-status-pill');
+        const txt = document.getElementById('gps-status-text');
+        if (!navigator.geolocation) {
+            pill.className = 'mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-red-50 text-red-700 text-[11px] font-semibold';
+            txt.textContent = 'Navegador sin soporte GPS.';
+            return;
+        }
+        navigator.geolocation.getCurrentPosition(
+            (pos) => {
+                gpsCoords.lat = pos.coords.latitude;
+                gpsCoords.lng = pos.coords.longitude;
+                const prec = Math.round(pos.coords.accuracy);
+                pill.className = 'mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#E8F3EA] text-[#197328] text-[11px] font-bold';
+                txt.innerHTML = `GPS Activo (${gpsCoords.lat.toFixed(5)}, ${gpsCoords.lng.toFixed(5)} • ±${prec}m) • <a href="https://www.google.com/maps?q=${gpsCoords.lat},${gpsCoords.lng}" target="_blank" class="underline">Ver Mapa</a>`;
+            },
+            () => {
+                pill.className = 'mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-red-50 text-red-700 text-[11px] font-bold';
+                txt.textContent = 'Permiso de GPS denegado. Actívelo en su celular para poder marcar.';
+            },
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        );
+    }
+
+    document.addEventListener('DOMContentLoaded', solicitarUbicacionGPS);
 
     // Generar o recuperar el identificador único permanente de este teléfono móvil
     function obtenerDeviceToken() {
@@ -1717,6 +1950,8 @@ LARAVEL_FILE,
                 identificador: identificador.trim(),
                 device_token: obtenerDeviceToken(),
                 device_info: navigator.platform || 'Smartphone',
+                latitud: gpsCoords.lat,
+                longitud: gpsCoords.lng,
                 modo_prueba_admin: modoPruebaAdmin
             })
         });
@@ -1731,6 +1966,7 @@ LARAVEL_FILE,
             <div class="text-xs text-gray-500">${data.cargo || ''}</div>
             ${data.hora ? `<div class="text-sm font-bold text-[#373A39]">Hora: ${data.hora} • Estatus: ${data.estatus || ''}</div>` : ''}
             <p class="text-xs text-gray-600 pt-1">${data.mensaje}</p>
+            ${data.mapa_url ? `<a href="${data.mapa_url}" target="_blank" class="inline-block text-xs font-bold text-blue-600 hover:underline pt-1"><i class="fa-solid fa-map-pin mr-1"></i>Ver ubicación exacta en Google Maps</a>` : ''}
         `;
     }
 </script>
@@ -1788,6 +2024,7 @@ LARAVEL_FILE,
                         <th class="py-3 px-4">Entrada</th>
                         <th class="py-3 px-4">Salida</th>
                         <th class="py-3 px-4">Horas Lab.</th>
+                        <th class="py-3 px-4">Ubicación GPS</th>
                         <th class="py-3 px-4">Estatus</th>
                     </tr>
                 </thead>
@@ -1801,11 +2038,22 @@ LARAVEL_FILE,
                         <td class="py-3 px-4 font-semibold">{{ $r->hora_entrada ? substr($r->hora_entrada, 0, 5) : '--:--' }}</td>
                         <td class="py-3 px-4 font-semibold">{{ $r->hora_salida ? substr($r->hora_salida, 0, 5) : '--:--' }}</td>
                         <td class="py-3 px-4">{{ $r->horas_laboradas }}</td>
+                        <td class="py-3 px-4 text-xs">
+                            @if($r->latitud_marcaje && $r->longitud_marcaje)
+                                <a href="https://www.google.com/maps?q={{ $r->latitud_marcaje }},{{ $r->longitud_marcaje }}" target="_blank"
+                                   class="inline-flex items-center gap-1 text-blue-600 hover:underline font-semibold">
+                                    <i class="fa-solid fa-location-dot"></i>
+                                    <span>{{ $r->distancia_metros !== null ? $r->distancia_metros . 'm' : 'Mapa' }}</span>
+                                </a>
+                            @else
+                                <span class="text-gray-400">N/A</span>
+                            @endif
+                        </td>
                         <td class="py-3 px-4 font-bold">{{ $r->estatus }}</td>
                     </tr>
                     @empty
                     <tr>
-                        <td colspan="8" class="py-8 text-center text-gray-400">No se encontraron registros para el rango seleccionado.</td>
+                        <td colspan="9" class="py-8 text-center text-gray-400">No se encontraron registros para el rango seleccionado.</td>
                     </tr>
                     @endforelse
                 </tbody>

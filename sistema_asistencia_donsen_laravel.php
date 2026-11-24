@@ -129,6 +129,37 @@ return new class extends Migration
 LARAVEL_FILE,
 
     // =========================================================================
+    // 1B. MIGRACIÓN ANTI-SUPLANTACIÓN: VINCULACIÓN DE DISPOSITIVO ÚNICO
+    // =========================================================================
+    'database/migrations/2026_01_02_000002_add_device_lock_to_empleados_table.php' => <<<'LARAVEL_FILE'
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('empleados', function (Blueprint $table) {
+            if (!Schema::hasColumn('empleados', 'device_token')) {
+                $table->string('device_token', 100)->nullable()->unique()->after('codigo_qr_empleado');
+                $table->string('device_info', 120)->nullable()->after('device_token');
+            }
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('empleados', function (Blueprint $table) {
+            $table->dropColumn(['device_token', 'device_info']);
+        });
+    }
+};
+LARAVEL_FILE,
+
+    // =========================================================================
     // 2. SEEDER CON LA PLANTILLA CENSAL DE 9 TRABAJADORES DE DONSEN
     // =========================================================================
     'database/seeders/DatabaseSeeder.php' => <<<'LARAVEL_FILE'
@@ -412,6 +443,8 @@ class Empleado extends Model
         'departamento_id',
         'horario_id',
         'codigo_qr_empleado',
+        'device_token',
+        'device_info',
         'estado',
     ];
 
@@ -685,6 +718,17 @@ class EmpleadoController extends Controller
         return redirect()->route('empleados.index')
                          ->with('success', 'Empleado eliminado del sistema: ' . $nombre);
     }
+
+    public function resetDevice(Empleado $empleado)
+    {
+        $empleado->update([
+            'device_token' => null,
+            'device_info' => null,
+        ]);
+
+        return redirect()->route('empleados.index')
+                         ->with('success', 'Teléfono desvinculado para ' . $empleado->nombres_apellidos . '. Podrá registrar un nuevo equipo en su próximo escaneo.');
+    }
 }
 LARAVEL_FILE,
 
@@ -701,7 +745,7 @@ use Carbon\Carbon;
 
 class AsistenciaController extends Controller
 {
-    public function vistaEscaner()
+    public function vistaEscaner(Request $request)
     {
         $hoy = Carbon::today()->toDateString();
         $empleados = Empleado::with('horario')
@@ -712,18 +756,33 @@ class AsistenciaController extends Controller
         $asistenciasHoy = Asistencia::where('fecha', $hoy)->get()->keyBy('empleado_id');
         $sedeQr = SedeQr::where('activo', true)->first();
 
-        return view('scanner.index', compact('empleados', 'asistenciasHoy', 'sedeQr', 'hoy'));
+        // Si el trabajador escanea el QR de la entrada con la cámara nativa del teléfono
+        $sedePrevalidada = null;
+        if ($request->filled('sede')) {
+            $sedePrevalidada = SedeQr::validarCodigo($request->query('sede'));
+        }
+
+        return view('scanner.index', compact('empleados', 'asistenciasHoy', 'sedeQr', 'hoy', 'sedePrevalidada'));
     }
 
     public function registrarMarcaje(Request $request)
     {
         $request->validate([
             'qr_sede' => ['required', 'string'],
-            'qr_empleado' => ['required', 'string'],
+            'identificador' => ['required', 'string'],
+            'device_token' => ['required', 'string', 'min:10', 'max:100'],
+            'device_info' => ['nullable', 'string', 'max:120'],
             'hora_simulada' => ['nullable', 'date_format:H:i'],
         ]);
 
-        $sede = SedeQr::validarCodigo($request->qr_sede);
+        // Extraer código de sede (soporta tanto código plano como URL completa del QR de entrada)
+        $rawSede = trim($request->qr_sede);
+        if (str_contains($rawSede, 'sede=')) {
+            parse_str(parse_url($rawSede, PHP_URL_QUERY) ?? '', $queryParams);
+            $rawSede = $queryParams['sede'] ?? $rawSede;
+        }
+
+        $sede = SedeQr::validarCodigo($rawSede);
         if (!$sede) {
             return response()->json([
                 'ok' => false,
@@ -733,16 +792,26 @@ class AsistenciaController extends Controller
             ], 400);
         }
 
+        // Buscar empleado por Token QR individual O por Cédula de Identidad
+        $idInput = strtoupper(trim($request->identificador));
+        $soloDigitos = preg_replace('/\D/', '', $idInput);
+
         $empleado = Empleado::with(['horario', 'departamento'])
-            ->where('codigo_qr_empleado', trim($request->qr_empleado))
+            ->where(function ($q) use ($idInput, $soloDigitos) {
+                $q->where('codigo_qr_empleado', $idInput)
+                  ->orWhere('cedula', $idInput);
+                if ($soloDigitos !== '') {
+                    $q->orWhereRaw("REPLACE(REPLACE(UPPER(cedula), 'V-', ''), '.', '') = ?", [$soloDigitos]);
+                }
+            })
             ->first();
 
         if (!$empleado) {
             return response()->json([
                 'ok' => false,
                 'tipo' => 'error',
-                'titulo' => 'Carnet QR No Reconocido',
-                'mensaje' => 'El código QR escaneado no corresponde a ningún empleado registrado.',
+                'titulo' => 'Trabajador No Reconocido',
+                'mensaje' => 'La cédula o código QR ingresado no corresponde a ningún empleado registrado.',
             ], 404);
         }
 
@@ -753,6 +822,50 @@ class AsistenciaController extends Controller
                 'titulo' => 'Trabajador Inactivo',
                 'mensaje' => 'Su ficha se encuentra inactiva. Comuníquese con Administración.',
             ], 403);
+        }
+
+        // =====================================================================
+        // VALIDACIÓN ANTI-SUPLANTACIÓN (1 TELÉFONO = 1 TRABAJADOR)
+        // =====================================================================
+        $deviceToken = trim($request->device_token);
+        $esAdminEnPruebas = auth()->check() && $request->boolean('modo_prueba_admin');
+
+        if (!$esAdminEnPruebas) {
+            // 1. Verificar si este teléfono ya pertenece a OTRO compañero
+            $duenoDispositivo = Empleado::where('device_token', $deviceToken)
+                ->where('id', '!=', $empleado->id)
+                ->first();
+
+            if ($duenoDispositivo) {
+                return response()->json([
+                    'ok' => false,
+                    'tipo' => 'error',
+                    'badge' => 'SUPLANTACIÓN BLOQUEADA',
+                    'empleado' => $empleado->nombres_apellidos,
+                    'cargo' => $empleado->cargo,
+                    'mensaje' => 'Este dispositivo móvil ya está vinculado exclusivamente a ' . $duenoDispositivo->nombres_apellidos . '. No está permitido marcar asistencia por otros compañeros.',
+                ], 403);
+            }
+
+            // 2. Verificar si el empleado ya tiene vinculado otro teléfono distinto
+            if ($empleado->device_token && $empleado->device_token !== $deviceToken) {
+                return response()->json([
+                    'ok' => false,
+                    'tipo' => 'error',
+                    'badge' => 'DISPOSITIVO NO AUTORIZADO',
+                    'empleado' => $empleado->nombres_apellidos,
+                    'cargo' => $empleado->cargo,
+                    'mensaje' => 'Usted ya tiene vinculado otro teléfono personal (' . ($empleado->device_info ?? 'Móvil registrado') . '). Si cambió de equipo, solicite a Administración desvincular el anterior.',
+                ], 403);
+            }
+
+            // 3. Si es su primer marcaje, vincular este teléfono a su ficha
+            if (!$empleado->device_token) {
+                $empleado->update([
+                    'device_token' => $deviceToken,
+                    'device_info' => substr($request->input('device_info', 'Smartphone Personal'), 0, 120),
+                ]);
+            }
         }
 
         $hoy = Carbon::today()->toDateString();
@@ -786,8 +899,8 @@ class AsistenciaController extends Controller
                 'hora' => $horaActual->format('H:i'),
                 'estatus' => $estatus,
                 'mensaje' => $estatus === 'Retardo'
-                    ? 'Entrada registrada fuera del margen de tolerancia (' . $empleado->horario->tolerancia_min . ' min).'
-                    : 'Entrada registrada puntualmente dentro del horario establecido.',
+                    ? 'Entrada registrada fuera del margen de tolerancia (' . $empleado->horario->tolerancia_min . ' min). Dispositivo verificado.'
+                    : 'Entrada registrada puntualmente. Dispositivo móvil vinculado y verificado.',
             ]);
         }
 
@@ -973,6 +1086,7 @@ Route::middleware(['auth'])->group(function () {
     Route::post('/empleados', [EmpleadoController::class, 'store'])->name('empleados.store');
     Route::put('/empleados/{empleado}', [EmpleadoController::class, 'update'])->name('empleados.update');
     Route::patch('/empleados/{empleado}/estado', [EmpleadoController::class, 'toggleEstado'])->name('empleados.toggle');
+    Route::patch('/empleados/{empleado}/reset-device', [EmpleadoController::class, 'resetDevice'])->name('empleados.resetDevice');
     Route::delete('/empleados/{empleado}', [EmpleadoController::class, 'destroy'])->name('empleados.destroy');
 
     // Consultas y Reportes Gerenciales (Excel CSV y PDF)
@@ -1298,9 +1412,9 @@ LARAVEL_FILE,
         <div class="flex items-center gap-4">
             <div id="qr-sede-preview" class="p-2 bg-white border border-gray-200 rounded-xl"></div>
             <div>
-                <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#E8F3EA] text-[#197328]">QR Fijo Institucional Activo</span>
+                <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#E8F3EA] text-[#197328]">QR Fijo de Entrada Activo (URL Directa)</span>
                 <h2 class="text-base font-bold text-[#373A39] mt-1">{{ $sedeQr->nombre_sede }}</h2>
-                <p class="text-xs text-gray-500">{{ $sedeQr->ubicacion }} • Código: <code class="font-bold text-[#197328]">{{ $sedeQr->codigo_qr_fijo }}</code></p>
+                <p class="text-xs text-gray-500">{{ $sedeQr->ubicacion }} • Enlace QR: <code class="font-bold text-[#197328]">{{ url('/marcaje-qr?sede=' . $sedeQr->codigo_qr_fijo) }}</code></p>
             </div>
         </div>
     </div>
@@ -1315,7 +1429,7 @@ LARAVEL_FILE,
                         <th class="py-3 px-4">Nombres y Apellidos</th>
                         <th class="py-3 px-4">Cargo / Departamento</th>
                         <th class="py-3 px-4">Horario</th>
-                        <th class="py-3 px-4">Token QR</th>
+                        <th class="py-3 px-4">Dispositivo Móvil</th>
                         <th class="py-3 px-4">Estado</th>
                         <th class="py-3 px-4 text-right">Acciones</th>
                     </tr>
@@ -1327,7 +1441,16 @@ LARAVEL_FILE,
                         <td class="py-3 px-4 font-bold text-[#373A39]">{{ $emp->nombres_apellidos }}</td>
                         <td class="py-3 px-4 text-xs">{{ $emp->cargo }} ({{ $emp->departamento->nombre_departamento }})</td>
                         <td class="py-3 px-4 text-xs">{{ $emp->horario->turno }}</td>
-                        <td class="py-3 px-4"><code class="text-xs bg-gray-100 px-2 py-1 rounded">{{ $emp->codigo_qr_empleado }}</code></td>
+                        <td class="py-3 px-4 text-xs">
+                            @if($emp->device_token)
+                                <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 font-bold text-[11px]">
+                                    <i class="fa-solid fa-mobile-screen-button"></i>
+                                    <span>Vinculado</span>
+                                </div>
+                            @else
+                                <span class="text-gray-400 text-[11px]">Sin vincular</span>
+                            @endif
+                        </td>
                         <td class="py-3 px-4">
                             <form method="POST" action="{{ route('empleados.toggle', $emp) }}">
                                 @csrf @method('PATCH')
@@ -1338,6 +1461,16 @@ LARAVEL_FILE,
                         </td>
                         <td class="py-3 px-4 text-right whitespace-nowrap">
                             <div class="inline-flex items-center gap-1.5">
+                                @if($emp->device_token)
+                                <form method="POST" action="{{ route('empleados.resetDevice', $emp) }}"
+                                      onsubmit="return confirm('¿Desvincular el teléfono registrado de {{ $emp->nombres_apellidos }}?');">
+                                    @csrf @method('PATCH')
+                                    <button type="submit" title="Desvincular teléfono móvil"
+                                            class="px-2.5 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-500 text-amber-700 hover:text-white text-xs font-bold transition">
+                                        <i class="fa-solid fa-mobile-screen"></i>
+                                    </button>
+                                </form>
+                                @endif
                                 <button type="button"
                                         onclick="mostrarCarnetQR('{{ $emp->nombres_apellidos }}', '{{ $emp->cargo }}', '{{ $emp->cedula }}', '{{ $emp->codigo_qr_empleado }}')"
                                         class="px-3 py-1.5 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs font-bold">
@@ -1408,7 +1541,7 @@ LARAVEL_FILE,
     document.addEventListener('DOMContentLoaded', () => {
         const sedeBox = document.getElementById('qr-sede-preview');
         if (sedeBox && typeof QRCode !== 'undefined') {
-            new QRCode(sedeBox, { text: '{{ $sedeQr->codigo_qr_fijo ?? "DONSEN-SEDE-CCS-2026" }}', width: 84, height: 84, colorDark: '#197328' });
+            new QRCode(sedeBox, { text: '{{ url("/marcaje-qr?sede=" . ($sedeQr->codigo_qr_fijo ?? "DONSEN-SEDE-CCS-2026")) }}', width: 92, height: 92, colorDark: '#197328' });
         }
     });
 
@@ -1433,19 +1566,23 @@ LARAVEL_FILE,
 @section('content')
 <div class="max-w-lg mx-auto space-y-5">
     <div class="bg-white p-5 rounded-2xl border border-gray-200 text-center">
-        <span class="px-3 py-1 rounded-full bg-[#E8F3EA] text-[#197328] text-xs font-bold">Doble Validación QR • Donsen</span>
+        <span class="px-3 py-1 rounded-full bg-[#E8F3EA] text-[#197328] text-xs font-bold">
+            <i class="fa-solid fa-shield-halved mr-1"></i>Seguridad Anti-Suplantación Activa • Donsen
+        </span>
         <h1 class="text-xl font-extrabold text-[#373A39] mt-2">Registro de Asistencia Laboral</h1>
-        <p class="text-xs text-gray-500 mt-1">Paso 1: Validar QR Fijo de Sede • Paso 2: Escanear QR Individual</p>
+        <p class="text-xs text-gray-500 mt-1">1 teléfono personal = 1 trabajador autorizado</p>
     </div>
 
-    <div id="paso-1-card" class="bg-white p-6 rounded-2xl border border-gray-200 space-y-4">
-        <h2 class="text-base font-bold text-[#373A39]">1. Validar QR Fijo de la Sede Principal</h2>
+    <!-- PASO 1: QR DE LA ENTRADA -->
+    <div id="paso-1-card" class="{{ $sedePrevalidada ? 'hidden' : '' }} bg-white p-6 rounded-2xl border border-gray-200 space-y-4">
+        <h2 class="text-base font-bold text-[#373A39]">1. Escanear QR de la Entrada de Donsen</h2>
+        <p class="text-xs text-gray-500">Apunte la cámara de su celular al cartel QR ubicado en la entrada principal.</p>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             <button type="button" onclick="iniciarCamara('sede')" class="py-3 px-4 rounded-xl bg-[#373A39] text-white text-xs font-bold">
-                <i class="fa-solid fa-camera mr-1.5"></i>Usar Cámara QR
+                <i class="fa-solid fa-camera mr-1.5"></i>Escanear QR Entrada
             </button>
             <button type="button" onclick="validarSede('{{ $sedeQr->codigo_qr_fijo ?? 'DONSEN-SEDE-CCS-2026' }}')" class="py-3 px-4 rounded-xl bg-[#197328] text-white text-xs font-bold">
-                <i class="fa-solid fa-bolt mr-1.5"></i>Simular QR Sede
+                <i class="fa-solid fa-bolt mr-1.5"></i>Simular Entrada Sede
             </button>
         </div>
     </div>
@@ -1455,38 +1592,83 @@ LARAVEL_FILE,
         <button type="button" onclick="detenerCamara()" class="w-full py-2 rounded-xl bg-red-50 text-red-600 text-xs font-bold">Cerrar Cámara</button>
     </div>
 
-    <div id="paso-2-card" class="hidden bg-white p-6 rounded-2xl border border-gray-200 space-y-4">
-        <div class="p-3 rounded-xl bg-[#E8F3EA] text-[#197328] text-xs font-bold">
-            <i class="fa-solid fa-check-circle mr-1"></i>Sede Verificada: <span id="sede-activa-label"></span>
+    <!-- PASO 2: IDENTIFICACIÓN PERSONAL + BLOQUEO DE DISPOSITIVO -->
+    <div id="paso-2-card" class="{{ $sedePrevalidada ? '' : 'hidden' }} bg-white p-6 rounded-2xl border border-gray-200 space-y-4">
+        <div class="p-3 rounded-xl bg-[#E8F3EA] text-[#197328] text-xs font-bold flex items-center justify-between">
+            <span><i class="fa-solid fa-check-circle mr-1"></i>Sede Verificada: <span id="sede-activa-label">{{ $sedePrevalidada->codigo_qr_fijo ?? '' }}</span></span>
+            <span class="text-[10px] uppercase bg-white px-2 py-0.5 rounded">Móvil Protegido</span>
         </div>
-        <h2 class="text-base font-bold text-[#373A39]">2. Escanear Carnet QR Individual</h2>
-        <button type="button" onclick="iniciarCamara('empleado')" class="w-full py-3 rounded-xl bg-[#373A39] text-white text-xs font-bold">
-            <i class="fa-solid fa-camera mr-1.5"></i>Escanear Carnet QR con Cámara
-        </button>
 
-        <div class="bg-[#F4F6F5] p-4 rounded-xl space-y-3">
-            <label class="block text-xs font-bold text-[#373A39]">Simulación por Trabajador:</label>
-            <select id="select-empleado-qr" class="w-full px-3 py-2.5 rounded-xl border bg-white text-xs font-semibold">
-                @foreach($empleados as $emp)
-                    <option value="{{ $emp->codigo_qr_empleado }}">{{ $emp->nombres_apellidos }} ({{ $emp->cargo }})</option>
-                @endforeach
-            </select>
-            <button type="button" onclick="enviarMarcajeAjax(document.getElementById('select-empleado-qr').value)"
-                    class="w-full py-3 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs font-bold">
-                <i class="fa-solid fa-qrcode mr-1.5"></i>Registrar Asistencia en Base de Datos
+        <h2 class="text-base font-bold text-[#373A39]">2. Confirme su Identidad Personal</h2>
+        <p class="text-xs text-gray-500">
+            Al registrar su asistencia, este teléfono quedará vinculado exclusivamente a su cédula para evitar marcajes por terceros.
+        </p>
+
+        <div class="space-y-3">
+            <div>
+                <label class="block text-xs font-bold text-[#373A39] mb-1">Ingrese su Cédula de Identidad:</label>
+                <input type="text" id="input-identificador-emp" placeholder="Ej: V-24.512.889"
+                       class="w-full px-3.5 py-3 rounded-xl border border-gray-300 text-sm font-semibold focus:ring-2 focus:ring-[#197328] focus:outline-none">
+            </div>
+
+            <button type="button" onclick="enviarMarcajeAjax(document.getElementById('input-identificador-emp').value, false)"
+                    class="w-full py-3.5 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs sm:text-sm font-bold shadow-xs">
+                <i class="fa-solid fa-fingerprint mr-1.5"></i>Registrar mi Entrada / Salida
+            </button>
+
+            <button type="button" onclick="iniciarCamara('empleado')"
+                    class="w-full py-2.5 rounded-xl bg-[#F4F6F5] hover:bg-gray-200 text-[#373A39] text-xs font-bold">
+                <i class="fa-solid fa-qrcode mr-1.5"></i>O escanear mi Carnet QR Individual
             </button>
         </div>
+
+        @auth
+        <div class="pt-4 border-t border-gray-200 space-y-2.5">
+            <div class="text-[11px] font-bold uppercase text-amber-700">
+                <i class="fa-solid fa-user-shield mr-1"></i>Modo Simulación (Solo Administrador Logueado):
+            </div>
+            <select id="select-empleado-qr" class="w-full px-3 py-2 rounded-xl border bg-white text-xs font-semibold">
+                @foreach($empleados as $emp)
+                    <option value="{{ $emp->codigo_qr_empleado }}">{{ $emp->nombres_apellidos }} ({{ $emp->cedula }})</option>
+                @endforeach
+            </select>
+            <button type="button" onclick="enviarMarcajeAjax(document.getElementById('select-empleado-qr').value, true)"
+                    class="w-full py-2.5 rounded-xl bg-[#373A39] text-white text-xs font-bold">
+                Simular Marcaje como Administrador
+            </button>
+        </div>
+        @endauth
     </div>
 
     <div id="resultado-marcaje-box" class="hidden bg-white p-6 rounded-2xl border-2 shadow-md space-y-2"></div>
 </div>
 
 <script>
-    let qrSedeValidado = null;
+    let qrSedeValidado = @json($sedePrevalidada->codigo_qr_fijo ?? null);
     let html5Qr = null;
 
+    // Generar o recuperar el identificador único permanente de este teléfono móvil
+    function obtenerDeviceToken() {
+        let token = localStorage.getItem('donsen_device_token');
+        if (!token) {
+            const randomPart = (window.crypto && crypto.randomUUID)
+                ? crypto.randomUUID()
+                : 'DEV-' + Date.now() + '-' + Math.random().toString(36).substring(2, 12);
+            token = 'DONSEN-PHONE-' + randomPart;
+            localStorage.setItem('donsen_device_token', token);
+        }
+        return token;
+    }
+
     function validarSede(codigo) {
-        qrSedeValidado = codigo.trim();
+        let limpio = codigo.trim();
+        if (limpio.includes('sede=')) {
+            try {
+                const u = new URL(limpio);
+                limpio = u.searchParams.get('sede') || limpio;
+            } catch (e) {}
+        }
+        qrSedeValidado = limpio;
         document.getElementById('sede-activa-label').textContent = qrSedeValidado;
         document.getElementById('paso-1-card').classList.add('hidden');
         document.getElementById('paso-2-card').classList.remove('hidden');
@@ -1502,7 +1684,7 @@ LARAVEL_FILE,
                 if (objetivo === 'sede') {
                     validarSede(texto);
                 } else {
-                    enviarMarcajeAjax(texto);
+                    enviarMarcajeAjax(texto, false);
                 }
             });
         } catch (e) {
@@ -1518,7 +1700,11 @@ LARAVEL_FILE,
         }
     }
 
-    async function enviarMarcajeAjax(qrEmpleado) {
+    async function enviarMarcajeAjax(identificador, modoPruebaAdmin = false) {
+        if (!identificador || !identificador.trim()) {
+            return;
+        }
+
         const res = await fetch('{{ route("api.marcar") }}', {
             method: 'POST',
             headers: {
@@ -1528,7 +1714,10 @@ LARAVEL_FILE,
             },
             body: JSON.stringify({
                 qr_sede: qrSedeValidado,
-                qr_empleado: qrEmpleado
+                identificador: identificador.trim(),
+                device_token: obtenerDeviceToken(),
+                device_info: navigator.platform || 'Smartphone',
+                modo_prueba_admin: modoPruebaAdmin
             })
         });
 
@@ -1540,7 +1729,7 @@ LARAVEL_FILE,
             <div class="text-xs font-extrabold uppercase ${data.ok ? 'text-[#197328]' : 'text-rose-600'}">${data.badge || data.titulo}</div>
             <div class="text-lg font-extrabold text-[#373A39]">${data.empleado || ''}</div>
             <div class="text-xs text-gray-500">${data.cargo || ''}</div>
-            <div class="text-sm font-bold text-[#373A39]">Hora: ${data.hora || '--:--'} • Estatus: ${data.estatus || ''}</div>
+            ${data.hora ? `<div class="text-sm font-bold text-[#373A39]">Hora: ${data.hora} • Estatus: ${data.estatus || ''}</div>` : ''}
             <p class="text-xs text-gray-600 pt-1">${data.mensaje}</p>
         `;
     }

@@ -110,7 +110,7 @@ return new class extends Migration
             $table->date('fecha');
             $table->time('hora_entrada')->nullable();
             $table->time('hora_salida')->nullable();
-            $table->enum('estatus', ['A tiempo', 'Retardo', 'Inasistencia'])->default('A tiempo');
+            $table->string('estatus', 30)->default('A tiempo');
             $table->timestamps();
 
             $table->unique(['empleado_id', 'fecha'], 'idx_empleado_fecha_unica');
@@ -204,6 +204,52 @@ return new class extends Migration
 LARAVEL_FILE,
 
     // =========================================================================
+    // 1D. MIGRACIÓN ROLES/PERMISOS DE USUARIOS Y PERMISOS LABORALES JUSTIFICADOS
+    // =========================================================================
+    'database/migrations/2026_01_04_000004_add_roles_permisos_and_justificaciones.php' => <<<'LARAVEL_FILE'
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\DB;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('users', function (Blueprint $table) {
+            if (!Schema::hasColumn('users', 'permisos')) {
+                $table->json('permisos')->nullable()->after('rol');
+            }
+        });
+
+        if (DB::getDriverName() === 'pgsql') {
+            DB::statement('ALTER TABLE asistencias DROP CONSTRAINT IF EXISTS asistencias_estatus_check');
+            DB::statement('ALTER TABLE users DROP CONSTRAINT IF EXISTS users_rol_check');
+            DB::statement('ALTER TABLE users ALTER COLUMN rol TYPE VARCHAR(60)');
+        }
+
+        Schema::table('asistencias', function (Blueprint $table) {
+            if (!Schema::hasColumn('asistencias', 'motivo_permiso')) {
+                $table->string('motivo_permiso', 255)->nullable()->after('estatus');
+            }
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('users', function (Blueprint $table) {
+            $table->dropColumn('permisos');
+        });
+        Schema::table('asistencias', function (Blueprint $table) {
+            $table->dropColumn('motivo_permiso');
+        });
+    }
+};
+LARAVEL_FILE,
+
+    // =========================================================================
     // 2. SEEDER CON LA PLANTILLA CENSAL DE 9 TRABAJADORES DE DONSEN
     // =========================================================================
     'database/seeders/DatabaseSeeder.php' => <<<'LARAVEL_FILE'
@@ -231,6 +277,17 @@ class DatabaseSeeder extends Seeder
                 'name' => 'Carlos Mendoza',
                 'password' => Hash::make('password123'),
                 'rol' => 'Director General',
+                'permisos' => ['dashboard', 'empleados', 'permisos_laborales', 'reportes', 'usuarios_roles'],
+            ]
+        );
+
+        User::updateOrCreate(
+            ['email' => 'admin@donsen.com'],
+            [
+                'name' => 'María Fernanda Gómez',
+                'password' => Hash::make('password123'),
+                'rol' => 'Administradora',
+                'permisos' => ['dashboard', 'empleados', 'permisos_laborales', 'reportes'],
             ]
         );
 
@@ -353,6 +410,7 @@ class User extends Authenticatable
         'email',
         'password',
         'rol',
+        'permisos',
     ];
 
     protected $hidden = [
@@ -364,12 +422,22 @@ class User extends Authenticatable
     {
         return [
             'password' => 'hashed',
+            'permisos' => 'array',
         ];
     }
 
     public function esDirector(): bool
     {
         return $this->rol === 'Director General';
+    }
+
+    public function tienePermiso(string $permiso): bool
+    {
+        if ($this->esDirector()) {
+            return true;
+        }
+        $lista = is_array($this->permisos) ? $this->permisos : ['dashboard', 'empleados', 'permisos_laborales', 'reportes'];
+        return in_array($permiso, $lista, true);
     }
 }
 LARAVEL_FILE,
@@ -571,6 +639,7 @@ class Asistencia extends Model
         'hora_entrada',
         'hora_salida',
         'estatus',
+        'motivo_permiso',
         'latitud_marcaje',
         'longitud_marcaje',
         'distancia_metros',
@@ -824,6 +893,139 @@ class EmpleadoController extends Controller
         return redirect()->route('empleados.index')
                          ->with('success', 'Coordenadas GPS y radio de geocerca actualizados para ' . $sede->nombre_sede . '.');
     }
+
+    public function asignarPermisoLaboral(Request $request)
+    {
+        if (!auth()->user()->tienePermiso('permisos_laborales')) {
+            abort(403, 'No tiene permisos para asignar licencias laborales.');
+        }
+
+        $datos = $request->validate([
+            'empleado_id' => ['required', 'exists:empleados,id'],
+            'fecha' => ['required', 'date'],
+            'motivo_permiso' => ['required', 'string', 'max:255'],
+        ]);
+
+        $sede = SedeQr::where('activo', true)->firstOrFail();
+        $empleado = Empleado::findOrFail($datos['empleado_id']);
+
+        Asistencia::updateOrCreate(
+            [
+                'empleado_id' => $empleado->id,
+                'fecha' => $datos['fecha'],
+            ],
+            [
+                'sede_qr_id' => $sede->id,
+                'hora_entrada' => null,
+                'hora_salida' => null,
+                'estatus' => 'Permiso',
+                'motivo_permiso' => trim($datos['motivo_permiso']),
+            ]
+        );
+
+        return back()->with('success', 'Permiso laboral registrado para ' . $empleado->nombres_apellidos . ' el ' . \Carbon\Carbon::parse($datos['fecha'])->format('d/m/Y') . '.');
+    }
+}
+LARAVEL_FILE,
+
+    // =========================================================================
+    // 4A. CONTROLADOR DE USUARIOS, ROLES Y PERMISOS ADMINISTRATIVOS
+    // =========================================================================
+    'app/Http/Controllers/UsuarioRolController.php' => <<<'LARAVEL_FILE'
+<?php
+
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
+use App\Models\User;
+
+class UsuarioRolController extends Controller
+{
+    public function index()
+    {
+        if (!auth()->user()->tienePermiso('usuarios_roles')) {
+            abort(403, 'No tiene autorización para gestionar roles y permisos.');
+        }
+
+        $usuarios = User::orderBy('id')->get();
+        $catalogoPermisos = [
+            'dashboard' => 'Ver Panel Principal y Estadísticas',
+            'empleados' => 'Gestionar Empleados, Horarios y QR',
+            'permisos_laborales' => 'Asignar Permisos / Licencias a Trabajadores',
+            'reportes' => 'Consultar y Exportar Reportes (CSV/PDF)',
+            'usuarios_roles' => 'Administrar Usuarios, Roles y Permisos',
+        ];
+
+        return view('usuarios.index', compact('usuarios', 'catalogoPermisos'));
+    }
+
+    public function store(Request $request)
+    {
+        if (!auth()->user()->tienePermiso('usuarios_roles')) {
+            abort(403);
+        }
+
+        $datos = $request->validate([
+            'name' => ['required', 'string', 'max:100'],
+            'email' => ['required', 'email', 'max:150', 'unique:users,email'],
+            'password' => ['required', 'string', 'min:6'],
+            'rol' => ['required', 'string', 'max:60'],
+            'permisos' => ['nullable', 'array'],
+        ]);
+
+        User::create([
+            'name' => $datos['name'],
+            'email' => strtolower(trim($datos['email'])),
+            'password' => Hash::make($datos['password']),
+            'rol' => $datos['rol'],
+            'permisos' => $datos['permisos'] ?? ['dashboard'],
+        ]);
+
+        return redirect()->route('usuarios.index')->with('success', 'Usuario administrativo creado con su rol y permisos asignados.');
+    }
+
+    public function update(Request $request, User $user)
+    {
+        if (!auth()->user()->tienePermiso('usuarios_roles')) {
+            abort(403);
+        }
+
+        $datos = $request->validate([
+            'name' => ['required', 'string', 'max:100'],
+            'rol' => ['required', 'string', 'max:60'],
+            'permisos' => ['nullable', 'array'],
+            'password' => ['nullable', 'string', 'min:6'],
+        ]);
+
+        $updateData = [
+            'name' => $datos['name'],
+            'rol' => $datos['rol'],
+            'permisos' => $datos['permisos'] ?? [],
+        ];
+
+        if (!empty($datos['password'])) {
+            $updateData['password'] = Hash::make($datos['password']);
+        }
+
+        $user->update($updateData);
+
+        return redirect()->route('usuarios.index')->with('success', 'Rol y permisos actualizados para ' . $user->name . '.');
+    }
+
+    public function destroy(User $user)
+    {
+        if (!auth()->user()->tienePermiso('usuarios_roles')) {
+            abort(403);
+        }
+
+        if ($user->id === auth()->id()) {
+            return back()->withErrors(['No puede eliminar su propio usuario activo.']);
+        }
+
+        $user->delete();
+        return redirect()->route('usuarios.index')->with('success', 'Usuario administrativo eliminado.');
+    }
 }
 LARAVEL_FILE,
 
@@ -851,7 +1053,7 @@ class AsistenciaController extends Controller
         $asistenciasHoy = Asistencia::where('fecha', $hoy)->get()->keyBy('empleado_id');
         $sedeQr = SedeQr::where('activo', true)->first();
 
-        // Si el trabajador escanea el QR de la entrada con la cámara nativa del teléfono
+        // Al escanear el QR físico de la entrada con el teléfono, abre directamente con la sede validada
         $sedePrevalidada = null;
         if ($request->filled('sede')) {
             $sedePrevalidada = SedeQr::validarCodigo($request->query('sede'));
@@ -865,6 +1067,7 @@ class AsistenciaController extends Controller
         $request->validate([
             'qr_sede' => ['required', 'string'],
             'identificador' => ['required', 'string'],
+            'tipo_marcaje' => ['required', 'in:entrada,salida'],
             'device_token' => ['required', 'string', 'min:10', 'max:100'],
             'device_info' => ['nullable', 'string', 'max:120'],
             'latitud' => ['nullable', 'numeric', 'between:-90,90'],
@@ -885,11 +1088,12 @@ class AsistenciaController extends Controller
                 'ok' => false,
                 'tipo' => 'error',
                 'titulo' => 'QR de Sede Inválido',
-                'mensaje' => 'El código de sede recibido (' . $rawSede . ') no corresponde al QR oficial de la entrada de Donsen. Presione "Cambiar QR" y escanee el cartel de la entrada.',
+                'mensaje' => 'El código de sede recibido (' . $rawSede . ') no corresponde al QR oficial de la entrada de Donsen.',
             ], 400);
         }
 
         $esAdminEnPruebas = auth()->check() && $request->boolean('modo_prueba_admin');
+        $tipoMarcaje = $request->input('tipo_marcaje');
 
         // =====================================================================
         // VALIDACIÓN DE GEOCERCA GPS EN MAPA (EVITA QUE SE PASEN EL QR POR FOTO)
@@ -1003,8 +1207,34 @@ class AsistenciaController extends Controller
             ->where('fecha', $hoy)
             ->first();
 
-        // ESCENARIO A: Registro de ENTRADA
-        if (!$registro || !$registro->hora_entrada) {
+        if ($registro && $registro->estatus === 'Permiso') {
+            return response()->json([
+                'ok' => false,
+                'tipo' => 'blocked',
+                'badge' => 'PERMISO JUSTIFICADO ACTIVO',
+                'empleado' => $empleado->nombres_apellidos,
+                'cargo' => $empleado->cargo,
+                'mensaje' => 'Usted tiene un permiso administrativo registrado para hoy (' . ($registro->motivo_permiso ?? 'Autorizado por RR.HH.') . ').',
+            ], 422);
+        }
+
+        // =====================================================================
+        // OPCIÓN 1: EL TRABAJADOR PRESIONÓ "MARCAR ENTRADA"
+        // =====================================================================
+        if ($tipoMarcaje === 'entrada') {
+            if ($registro && $registro->hora_entrada) {
+                return response()->json([
+                    'ok' => false,
+                    'tipo' => 'blocked',
+                    'badge' => 'ENTRADA YA REGISTRADA HOY',
+                    'empleado' => $empleado->nombres_apellidos,
+                    'cargo' => $empleado->cargo,
+                    'hora' => substr($registro->hora_entrada, 0, 5),
+                    'estatus' => $registro->estatus,
+                    'mensaje' => 'Usted ya marcó su entrada hoy a las ' . substr($registro->hora_entrada, 0, 5) . '. Si va a retirarse, presione el botón "Marcar Salida".',
+                ], 422);
+            }
+
             $estatus = $empleado->horario->calcularEstatusPuntualidad($horaActual);
 
             Asistencia::updateOrCreate(
@@ -1036,49 +1266,48 @@ class AsistenciaController extends Controller
             ]);
         }
 
-        // ESCENARIO B: Registro de SALIDA
-        if ($registro->hora_entrada && !$registro->hora_salida) {
-            if (!$request->filled('hora_simulada') && $registro->created_at && $registro->created_at->diffInSeconds(Carbon::now()) < 60) {
-                return response()->json([
-                    'ok' => false,
-                    'tipo' => 'blocked',
-                    'badge' => 'MARCAJE DUPLICADO BLOQUEADO',
-                    'empleado' => $empleado->nombres_apellidos,
-                    'cargo' => $empleado->cargo,
-                    'hora' => substr($registro->hora_entrada, 0, 5),
-                    'estatus' => $registro->estatus,
-                    'mensaje' => 'Ya registró su entrada recientemente. Espere al menos 1 minuto para marcar salida.',
-                ], 422);
-            }
-
-            $registro->update([
-                'hora_salida' => $horaActual->format('H:i:s'),
-            ]);
-
+        // =====================================================================
+        // OPCIÓN 2: EL TRABAJADOR PRESIONÓ "MARCAR SALIDA"
+        // =====================================================================
+        if (!$registro || !$registro->hora_entrada) {
             return response()->json([
-                'ok' => true,
-                'tipo' => 'success',
-                'badge' => 'SALIDA REGISTRADA',
+                'ok' => false,
+                'tipo' => 'error',
+                'badge' => 'SIN ENTRADA PREVIA',
                 'empleado' => $empleado->nombres_apellidos,
-                'cargo' => $empleado->cargo . ' • ' . $empleado->departamento->nombre_departamento,
-                'hora' => $horaActual->format('H:i'),
-                'estatus' => $registro->estatus,
-                'mapa_url' => ($latitud && $longitud) ? "https://www.google.com/maps?q={$latitud},{$longitud}" : null,
-                'mensaje' => 'Salida registrada. Total laborado hoy: ' . $registro->horas_laboradas,
-            ]);
+                'cargo' => $empleado->cargo,
+                'mensaje' => 'No puede marcar salida porque aún no ha registrado su entrada en la jornada de hoy. Presione primero "Marcar Entrada".',
+            ], 422);
         }
 
-        // ESCENARIO C: Jornada ya cerrada
+        if ($registro->hora_salida) {
+            return response()->json([
+                'ok' => false,
+                'tipo' => 'blocked',
+                'badge' => 'SALIDA YA REGISTRADA HOY',
+                'empleado' => $empleado->nombres_apellidos,
+                'cargo' => $empleado->cargo,
+                'hora' => substr($registro->hora_entrada, 0, 5) . ' - ' . substr($registro->hora_salida, 0, 5),
+                'estatus' => $registro->estatus,
+                'mensaje' => 'Usted ya completó su jornada de hoy (Entrada: ' . substr($registro->hora_entrada, 0, 5) . ' | Salida: ' . substr($registro->hora_salida, 0, 5) . ').',
+            ], 422);
+        }
+
+        $registro->update([
+            'hora_salida' => $horaActual->format('H:i:s'),
+        ]);
+
         return response()->json([
-            'ok' => false,
-            'tipo' => 'blocked',
-            'badge' => 'JORNADA YA COMPLETADA HOY',
+            'ok' => true,
+            'tipo' => 'success',
+            'badge' => 'SALIDA REGISTRADA',
             'empleado' => $empleado->nombres_apellidos,
-            'cargo' => $empleado->cargo,
-            'hora' => substr($registro->hora_entrada, 0, 5) . ' - ' . substr($registro->hora_salida, 0, 5),
+            'cargo' => $empleado->cargo . ' • ' . $empleado->departamento->nombre_departamento,
+            'hora' => $horaActual->format('H:i'),
             'estatus' => $registro->estatus,
-            'mensaje' => 'Usted ya registró su entrada y salida en la jornada de hoy.',
-        ], 422);
+            'mapa_url' => ($latitud && $longitud) ? "https://www.google.com/maps?q={$latitud},{$longitud}" : null,
+            'mensaje' => 'Salida registrada exitosamente. Total laborado hoy: ' . $registro->horas_laboradas,
+        ]);
     }
 }
 LARAVEL_FILE,
@@ -1233,6 +1462,7 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\EmpleadoController;
 use App\Http\Controllers\AsistenciaController;
 use App\Http\Controllers\ReporteController;
+use App\Http\Controllers\UsuarioRolController;
 
 // Rutas Públicas: Login y Terminal Móvil de Escaneo QR para Empleados
 Route::get('/', [AuthController::class, 'showLogin'])->name('login');
@@ -1246,7 +1476,7 @@ Route::post('/api/marcar-asistencia', [AsistenciaController::class, 'registrarMa
 Route::middleware(['auth'])->group(function () {
     Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
 
-    // CRUD Empleados, Horarios y Códigos QR
+    // CRUD Empleados, Horarios, Permisos Laborales y Códigos QR
     Route::get('/empleados', [EmpleadoController::class, 'index'])->name('empleados.index');
     Route::post('/empleados', [EmpleadoController::class, 'store'])->name('empleados.store');
     Route::put('/empleados/{empleado}', [EmpleadoController::class, 'update'])->name('empleados.update');
@@ -1254,6 +1484,13 @@ Route::middleware(['auth'])->group(function () {
     Route::patch('/empleados/{empleado}/reset-device', [EmpleadoController::class, 'resetDevice'])->name('empleados.resetDevice');
     Route::delete('/empleados/{empleado}', [EmpleadoController::class, 'destroy'])->name('empleados.destroy');
     Route::put('/sede/{sede}/ubicacion', [EmpleadoController::class, 'updateSedeUbicacion'])->name('sede.ubicacion');
+    Route::post('/permisos-laborales', [EmpleadoController::class, 'asignarPermisoLaboral'])->name('empleados.permiso');
+
+    // Gestión de Usuarios, Roles y Permisos del Sistema
+    Route::get('/usuarios-roles', [UsuarioRolController::class, 'index'])->name('usuarios.index');
+    Route::post('/usuarios-roles', [UsuarioRolController::class, 'store'])->name('usuarios.store');
+    Route::put('/usuarios-roles/{user}', [UsuarioRolController::class, 'update'])->name('usuarios.update');
+    Route::delete('/usuarios-roles/{user}', [UsuarioRolController::class, 'destroy'])->name('usuarios.destroy');
 
     // Consultas y Reportes Gerenciales (Excel CSV y PDF)
     Route::get('/reportes', [ReporteController::class, 'index'])->name('reportes.index');
@@ -1347,18 +1584,29 @@ LARAVEL_FILE,
 
         @auth
         <nav class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-2.5 flex items-center gap-2 overflow-x-auto">
-            <a href="{{ route('dashboard') }}" class="px-4 py-2 rounded-xl text-xs sm:text-sm font-bold {{ request()->routeIs('dashboard') ? 'bg-[#197328] text-white' : 'text-gray-600 hover:bg-gray-100' }}">
+            @if(Auth::user()->tienePermiso('dashboard'))
+            <a href="{{ route('dashboard') }}" class="px-4 py-2 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap {{ request()->routeIs('dashboard') ? 'bg-[#197328] text-white' : 'text-gray-600 hover:bg-gray-100' }}">
                 <i class="fa-solid fa-chart-pie mr-1.5"></i>Dashboard
             </a>
-            <a href="{{ route('empleados.index') }}" class="px-4 py-2 rounded-xl text-xs sm:text-sm font-bold {{ request()->routeIs('empleados.*') ? 'bg-[#197328] text-white' : 'text-gray-600 hover:bg-gray-100' }}">
+            @endif
+            @if(Auth::user()->tienePermiso('empleados'))
+            <a href="{{ route('empleados.index') }}" class="px-4 py-2 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap {{ request()->routeIs('empleados.*') ? 'bg-[#197328] text-white' : 'text-gray-600 hover:bg-gray-100' }}">
                 <i class="fa-solid fa-users-gear mr-1.5"></i>Empleados y Códigos QR
             </a>
-            <a href="{{ route('scanner.index') }}" class="px-4 py-2 rounded-xl text-xs sm:text-sm font-bold {{ request()->routeIs('scanner.*') ? 'bg-[#197328] text-white' : 'text-gray-600 hover:bg-gray-100' }}">
+            @endif
+            <a href="{{ route('scanner.index') }}" class="px-4 py-2 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap {{ request()->routeIs('scanner.*') ? 'bg-[#197328] text-white' : 'text-gray-600 hover:bg-gray-100' }}">
                 <i class="fa-solid fa-qrcode mr-1.5"></i>Marcaje QR (Empleado)
             </a>
-            <a href="{{ route('reportes.index') }}" class="px-4 py-2 rounded-xl text-xs sm:text-sm font-bold {{ request()->routeIs('reportes.*') ? 'bg-[#197328] text-white' : 'text-gray-600 hover:bg-gray-100' }}">
+            @if(Auth::user()->tienePermiso('reportes'))
+            <a href="{{ route('reportes.index') }}" class="px-4 py-2 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap {{ request()->routeIs('reportes.*') ? 'bg-[#197328] text-white' : 'text-gray-600 hover:bg-gray-100' }}">
                 <i class="fa-solid fa-file-export mr-1.5"></i>Consultas y Reportes
             </a>
+            @endif
+            @if(Auth::user()->tienePermiso('usuarios_roles'))
+            <a href="{{ route('usuarios.index') }}" class="px-4 py-2 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap {{ request()->routeIs('usuarios.*') ? 'bg-[#197328] text-white' : 'text-gray-600 hover:bg-gray-100' }}">
+                <i class="fa-solid fa-user-lock mr-1.5"></i>Roles y Permisos
+            </a>
+            @endif
         </nav>
         @endauth
     </header>
@@ -1538,8 +1786,12 @@ LARAVEL_FILE,
                                 {{ $reg && $reg->hora_salida ? substr($reg->hora_salida, 0, 5) : '--:--' }}
                             </td>
                             <td class="py-3 px-4">
-                                @if(!$reg || !$reg->hora_entrada)
+                                @if(!$reg)
                                     <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-rose-50 text-rose-600">Sin registro</span>
+                                @elseif($reg->estatus === 'Permiso')
+                                    <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-50 text-blue-700" title="{{ $reg->motivo_permiso }}">
+                                        <i class="fa-solid fa-file-signature mr-1"></i>Permiso
+                                    </span>
                                 @elseif($reg->estatus === 'Retardo')
                                     <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-700">Retardo</span>
                                 @else
@@ -1564,122 +1816,32 @@ LARAVEL_FILE,
 <div class="space-y-6">
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-            <h1 class="text-2xl font-extrabold text-[#373A39]">Gestión de Personal y Códigos QR</h1>
-            <p class="text-sm text-gray-500">Registro CRUD de empleados, control de estado y emisión de credenciales QR</p>
+            <h1 class="text-2xl font-extrabold text-[#373A39]">Gestión de Personal, Permisos y Códigos QR</h1>
+            <p class="text-sm text-gray-500">Registro CRUD de empleados, permisos justificados y cartel QR de acceso directo</p>
         </div>
-        <button type="button" onclick="document.getElementById('modal-nuevo-emp').classList.remove('hidden')"
-                class="px-4 py-2.5 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs font-bold">
-            <i class="fa-solid fa-user-plus mr-1.5"></i>Nuevo Empleado
-        </button>
-    </div>
-
-    @if($sedeQr)
-    <div class="bg-white p-5 rounded-2xl border border-gray-200 space-y-4">
-        <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-            <div class="flex items-center gap-4">
-                <div id="qr-sede-preview" class="p-2.5 bg-white border border-gray-200 rounded-xl shrink-0 cursor-pointer"
-                     onclick="document.getElementById('modal-cartel-sede').classList.remove('hidden')"
-                     title="Clic para ampliar QR de entrada"></div>
-                <div>
-                    <div class="flex flex-wrap items-center gap-2">
-                        <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#E8F3EA] text-[#197328]">QR Fijo Físico + Geocerca GPS</span>
-                        @if($sedeQr->latitud && $sedeQr->longitud)
-                            <a href="https://www.google.com/maps?q={{ $sedeQr->latitud }},{{ $sedeQr->longitud }}" target="_blank"
-                               class="text-xs font-bold text-blue-600 hover:underline">
-                                <i class="fa-solid fa-location-dot mr-1"></i>Ver Sede en Google Maps
-                            </a>
-                        @endif
-                    </div>
-                    <h2 class="text-base font-bold text-[#373A39] mt-1">{{ $sedeQr->nombre_sede }} (Radio permitido: {{ $sedeQr->radio_metros }}m)</h2>
-                    <p class="text-xs text-gray-500">{{ $sedeQr->ubicacion }} • Código: <code class="font-bold text-[#197328]">{{ $sedeQr->codigo_qr_fijo }}</code></p>
-                </div>
-            </div>
-            <div class="flex flex-wrap gap-2">
-                <button type="button" onclick="document.getElementById('modal-cartel-sede').classList.remove('hidden')"
-                        class="px-3.5 py-2 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs font-bold">
-                    <i class="fa-solid fa-expand mr-1.5"></i>Ver Cartel QR Grande
-                </button>
-                <button type="button" onclick="descargarCartelQRSede()"
-                        class="px-3.5 py-2 rounded-xl bg-[#373A39] hover:bg-black text-white text-xs font-bold">
-                    <i class="fa-solid fa-download mr-1.5"></i>Descargar Cartel (PNG)
-                </button>
-                <button type="button" onclick="document.getElementById('form-gps-sede').classList.toggle('hidden')"
-                        class="px-3.5 py-2 rounded-xl bg-[#E8F3EA] text-[#197328] text-xs font-bold">
-                    <i class="fa-solid fa-map-location-dot mr-1.5"></i>Calibrar GPS Sede
-                </button>
-            </div>
+        <div class="flex flex-wrap gap-2">
+            @if(Auth::user()->tienePermiso('permisos_laborales'))
+            <button type="button" onclick="abrirModalPermiso()"
+                    class="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold">
+                <i class="fa-solid fa-calendar-check mr-1.5"></i>Asignar Permiso Laboral
+            </button>
+            @endif
+            <button type="button" onclick="document.getElementById('modal-nuevo-emp').classList.remove('hidden')"
+                    class="px-4 py-2.5 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs font-bold">
+                <i class="fa-solid fa-user-plus mr-1.5"></i>Nuevo Empleado
+            </button>
         </div>
-
-        <form id="form-gps-sede" method="POST" action="{{ route('sede.ubicacion', $sedeQr) }}" class="hidden pt-4 border-t border-gray-100 grid grid-cols-1 sm:grid-cols-6 gap-3 items-end">
-            @csrf @method('PUT')
-            <input type="hidden" name="nombre_sede" value="{{ $sedeQr->nombre_sede }}">
-            <input type="hidden" name="ubicacion" value="{{ $sedeQr->ubicacion }}">
-            <div class="sm:col-span-2">
-                <label class="block text-[11px] font-bold text-gray-500 mb-1">Latitud Sede</label>
-                <input type="text" id="input-sede-lat" name="latitud" value="{{ $sedeQr->latitud }}" required class="w-full px-3 py-2 rounded-xl border text-xs font-mono">
-            </div>
-            <div class="sm:col-span-2">
-                <label class="block text-[11px] font-bold text-gray-500 mb-1">Longitud Sede</label>
-                <input type="text" id="input-sede-lng" name="longitud" value="{{ $sedeQr->longitud }}" required class="w-full px-3 py-2 rounded-xl border text-xs font-mono">
-            </div>
-            <div>
-                <label class="block text-[11px] font-bold text-gray-500 mb-1">Radio (metros)</label>
-                <input type="number" name="radio_metros" value="{{ $sedeQr->radio_metros }}" min="20" max="5000" required class="w-full px-3 py-2 rounded-xl border text-xs">
-            </div>
-            <div class="flex gap-1.5">
-                <button type="button" onclick="capturarUbicacionActualSede()" title="Tomar GPS de este dispositivo"
-                        class="px-3 py-2 rounded-xl bg-blue-600 text-white text-xs font-bold">
-                    <i class="fa-solid fa-crosshairs"></i>
-                </button>
-                <button type="submit" class="flex-1 py-2 px-3 rounded-xl bg-[#197328] text-white text-xs font-bold">
-                    Guardar
-                </button>
-            </div>
-        </form>
     </div>
-    @endif
-
-    <div class="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-        <div class="overflow-x-auto">
-            <table class="w-full text-left border-collapse">
-                <thead>
-                    <tr class="bg-[#F4F6F5] text-gray-500 text-xs uppercase border-b border-gray-200">
-                        <th class="py-3 px-4">Cédula</th>
-                        <th class="py-3 px-4">Nombres y Apellidos</th>
-                        <th class="py-3 px-4">Cargo / Departamento</th>
-                        <th class="py-3 px-4">Horario</th>
-                        <th class="py-3 px-4">Dispositivo Móvil</th>
-                        <th class="py-3 px-4">Estado</th>
-                        <th class="py-3 px-4 text-right">Acciones</th>
-                    </tr>
-                </thead>
-                <tbody class="divide-y divide-gray-100 text-sm">
-                    @foreach($empleados as $emp)
-                    <tr>
-                        <td class="py-3 px-4 font-mono text-xs font-bold">{{ $emp->cedula }}</td>
-                        <td class="py-3 px-4 font-bold text-[#373A39]">{{ $emp->nombres_apellidos }}</td>
-                        <td class="py-3 px-4 text-xs">{{ $emp->cargo }} ({{ $emp->departamento->nombre_departamento }})</td>
-                        <td class="py-3 px-4 text-xs">{{ $emp->horario->turno }}</td>
-                        <td class="py-3 px-4 text-xs">
-                            @if($emp->device_token)
-                                <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 font-bold text-[11px]">
-                                    <i class="fa-solid fa-mobile-screen-button"></i>
-                                    <span>Vinculado</span>
-                                </div>
-                            @else
-                                <span class="text-gray-400 text-[11px]">Sin vincular</span>
-                            @endif
-                        </td>
-                        <td class="py-3 px-4">
-                            <form method="POST" action="{{ route('empleados.toggle', $emp) }}">
-                                @csrf @method('PATCH')
-                                <button type="submit" class="px-2.5 py-1 rounded-full text-xs font-bold {{ $emp->estado ? 'bg-[#E8F3EA] text-[#197328]' : 'bg-gray-200 text-gray-600' }}">
-                                    {{ $emp->estado ? 'Activo' : 'Inactivo' }}
-                                </button>
-                            </form>
-                        </td>
                         <td class="py-3 px-4 text-right whitespace-nowrap">
                             <div class="inline-flex items-center gap-1.5">
+                                @if(Auth::user()->tienePermiso('permisos_laborales'))
+                                <button type="button"
+                                        onclick="abrirModalPermiso('{{ $emp->id }}')"
+                                        title="Registrar permiso / licencia"
+                                        class="px-2.5 py-1.5 rounded-xl bg-blue-50 hover:bg-blue-600 text-blue-700 hover:text-white text-xs font-bold transition">
+                                    <i class="fa-solid fa-calendar-check"></i>
+                                </button>
+                                @endif
                                 @if($emp->device_token)
                                 <form method="POST" action="{{ route('empleados.resetDevice', $emp) }}"
                                       onsubmit="return confirm('¿Desvincular el teléfono registrado de {{ $emp->nombres_apellidos }}?');">
@@ -1713,72 +1875,35 @@ LARAVEL_FILE,
     </div>
 </div>
 
-<!-- Modal Nuevo Empleado -->
-<div id="modal-nuevo-emp" class="hidden fixed inset-0 z-40 bg-black/50 flex items-center justify-center p-4">
+<!-- Modal Asignar Permiso Laboral -->
+<div id="modal-permiso-laboral" class="hidden fixed inset-0 z-40 bg-black/50 flex items-center justify-center p-4">
     <div class="bg-white rounded-2xl max-w-md w-full p-6 space-y-4">
         <div class="flex justify-between items-center border-b pb-3">
-            <h3 class="text-base font-bold">Registrar Nuevo Empleado</h3>
-            <button type="button" onclick="document.getElementById('modal-nuevo-emp').classList.add('hidden')"><i class="fa-solid fa-xmark"></i></button>
+            <h3 class="text-base font-bold text-[#373A39]"><i class="fa-solid fa-calendar-check text-blue-600 mr-1.5"></i>Registrar Permiso / Licencia</h3>
+            <button type="button" onclick="document.getElementById('modal-permiso-laboral').classList.add('hidden')"><i class="fa-solid fa-xmark"></i></button>
         </div>
-        <form method="POST" action="{{ route('empleados.store') }}" class="space-y-3">
+        <form method="POST" action="{{ route('empleados.permiso') }}" class="space-y-3">
             @csrf
-            <input type="text" name="cedula" placeholder="Cédula (Ej: V-25.123.456)" required class="w-full px-3 py-2 rounded-xl border text-sm">
-            <input type="text" name="nombres_apellidos" placeholder="Nombres y Apellidos" required class="w-full px-3 py-2 rounded-xl border text-sm">
-            <input type="text" name="cargo" placeholder="Cargo" required class="w-full px-3 py-2 rounded-xl border text-sm">
-            <select name="departamento_id" required class="w-full px-3 py-2 rounded-xl border text-sm bg-white">
-                @foreach($departamentos as $d)
-                    <option value="{{ $d->id }}">{{ $d->nombre_departamento }}</option>
-                @endforeach
-            </select>
-            <select name="horario_id" required class="w-full px-3 py-2 rounded-xl border text-sm bg-white">
-                @foreach($horarios as $h)
-                    <option value="{{ $h->id }}">{{ $h->turno }} ({{ substr($h->hora_entrada,0,5) }})</option>
-                @endforeach
-            </select>
-            <input type="hidden" name="estado" value="1">
-            <button type="submit" class="w-full py-2.5 rounded-xl bg-[#197328] text-white text-xs font-bold">Guardar y Generar QR</button>
+            <div>
+                <label class="block text-xs font-bold text-gray-600 mb-1">Trabajador *</label>
+                <select id="permiso-empleado-id" name="empleado_id" required class="w-full px-3 py-2.5 rounded-xl border text-sm bg-white">
+                    @foreach($empleados as $emp)
+                        <option value="{{ $emp->id }}">{{ $emp->nombres_apellidos }} ({{ $emp->cedula }})</option>
+                    @endforeach
+                </select>
+            </div>
+            <div>
+                <label class="block text-xs font-bold text-gray-600 mb-1">Fecha del Permiso *</label>
+                <input type="date" name="fecha" value="{{ now('America/Caracas')->toDateString() }}" required class="w-full px-3 py-2.5 rounded-xl border text-sm">
+            </div>
+            <div>
+                <label class="block text-xs font-bold text-gray-600 mb-1">Motivo / Justificación *</label>
+                <input type="text" name="motivo_permiso" placeholder="Ej: Reposo médico, diligencia personal autorizada..." required class="w-full px-3 py-2.5 rounded-xl border text-sm">
+            </div>
+            <button type="submit" class="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold">
+                Guardar Permiso Justificado
+            </button>
         </form>
-    </div>
-</div>
-
-<!-- Modal Cartel QR Grande de la Sede (Alta Resolución para Escaneo Rápido) -->
-@if($sedeQr)
-<div id="modal-cartel-sede" class="hidden fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4">
-    <div class="bg-white rounded-2xl max-w-sm w-full p-6 text-center space-y-4 border-2 border-[#197328]">
-        <div class="flex justify-center"><x-donsen-logo :width="150" /></div>
-        <div class="text-xs font-extrabold uppercase tracking-wider text-[#197328]">Punto de Marcaje de Asistencia</div>
-        <div class="bg-white p-5 border-2 border-gray-200 rounded-2xl inline-block">
-            <div id="qr-sede-hd"></div>
-        </div>
-        <div>
-            <div class="text-sm font-extrabold text-[#373A39]">{{ $sedeQr->nombre_sede }}</div>
-            <div class="text-xs text-gray-500">{{ $sedeQr->ubicacion }}</div>
-            <code class="inline-block mt-1.5 text-xs font-bold bg-[#E8F3EA] text-[#197328] px-3 py-1 rounded-lg">{{ $sedeQr->codigo_qr_fijo }}</code>
-        </div>
-        <div class="grid grid-cols-2 gap-2">
-            <button type="button" onclick="descargarCartelQRSede()" class="py-2.5 rounded-xl bg-[#197328] text-white text-xs font-bold">
-                <i class="fa-solid fa-download mr-1"></i>Descargar PNG
-            </button>
-            <button type="button" onclick="document.getElementById('modal-cartel-sede').classList.add('hidden')" class="py-2.5 rounded-xl bg-[#373A39] text-white text-xs font-bold">
-                Cerrar
-            </button>
-        </div>
-    </div>
-</div>
-@endif
-
-<!-- Modal Carnet QR Individual -->
-<div id="modal-carnet-qr" class="hidden fixed inset-0 z-40 bg-black/50 flex items-center justify-center p-4">
-    <div class="bg-white rounded-2xl max-w-sm w-full p-6 text-center space-y-4">
-        <div class="flex justify-center"><x-donsen-logo :width="135" /></div>
-        <div id="carnet-qr-box" class="flex justify-center p-4 bg-white border rounded-xl"></div>
-        <div>
-            <div id="carnet-nombre" class="text-base font-extrabold text-[#373A39]"></div>
-            <div id="carnet-cargo" class="text-xs text-[#197328] font-bold"></div>
-            <div id="carnet-cedula" class="text-xs text-gray-500"></div>
-            <code id="carnet-token" class="block mt-1 text-[11px] bg-gray-100 py-1 rounded"></code>
-        </div>
-        <button type="button" onclick="document.getElementById('modal-carnet-qr').classList.add('hidden')" class="w-full py-2 rounded-xl bg-[#373A39] text-white text-xs font-bold">Cerrar</button>
     </div>
 </div>
 
@@ -1866,6 +1991,13 @@ LARAVEL_FILE,
         link.click();
     }
 
+    function abrirModalPermiso(empId = null) {
+        if (empId) {
+            document.getElementById('permiso-empleado-id').value = empId;
+        }
+        document.getElementById('modal-permiso-laboral').classList.remove('hidden');
+    }
+
     function mostrarCarnetQR(nombre, cargo, cedula, token) {
         document.getElementById('carnet-nombre').textContent = nombre;
         document.getElementById('carnet-cargo').textContent = cargo;
@@ -1885,74 +2017,52 @@ LARAVEL_FILE,
 @section('title', 'Marcaje QR Empleado | Donsen®')
 
 @section('content')
+@php
+    // El QR físico de la sede lleva directamente a esta pantalla con la sede ya validada
+    $sedeActiva = $sedePrevalidada ?? $sedeQr;
+@endphp
 <div class="max-w-lg mx-auto space-y-5">
     <div class="bg-white p-5 rounded-2xl border border-gray-200 text-center">
         <span class="px-3 py-1 rounded-full bg-[#E8F3EA] text-[#197328] text-xs font-bold">
             <i class="fa-solid fa-location-dot mr-1"></i>Geocerca GPS + Dispositivo Único • Donsen
         </span>
         <h1 class="text-xl font-extrabold text-[#373A39] mt-2">Registro de Asistencia Laboral</h1>
-        <p class="text-xs text-gray-500 mt-1">Validación física en sede mediante GPS en mapa y teléfono vinculado</p>
+        <p class="text-xs text-gray-500 mt-1">Seleccione si marca Entrada o Salida e ingrese su Cédula de Identidad</p>
         <div id="gps-status-pill" class="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-50 text-amber-700 text-[11px] font-semibold">
             <i class="fa-solid fa-satellite-dish"></i>
             <span id="gps-status-text">Obteniendo coordenadas GPS del mapa...</span>
         </div>
     </div>
 
-    <!-- PASO 1: QR DE LA ENTRADA -->
-    <div id="paso-1-card" class="{{ $sedePrevalidada ? 'hidden' : '' }} bg-white p-6 rounded-2xl border border-gray-200 space-y-4">
-        <h2 class="text-base font-bold text-[#373A39]">1. Escanear QR Fijo de la Entrada de Donsen</h2>
-        <p class="text-xs text-gray-500">Apunte la cámara de su celular al cartel QR físico ubicado en la entrada principal (<code class="font-bold text-[#197328]">{{ $sedeQr->codigo_qr_fijo ?? 'DONSEN-SEDE-CCS-2026' }}</code>).</p>
-
-        <div id="paso-1-error" class="hidden p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold"></div>
-
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            <button type="button" onclick="iniciarCamara('sede')" class="py-3 px-4 rounded-xl bg-[#373A39] text-white text-xs font-bold">
-                <i class="fa-solid fa-camera mr-1.5"></i>Escanear QR Entrada
-            </button>
-            <button type="button" onclick="validarSede('{{ $sedeQr->codigo_qr_fijo ?? 'DONSEN-SEDE-CCS-2026' }}')" class="py-3 px-4 rounded-xl bg-[#197328] text-white text-xs font-bold">
-                <i class="fa-solid fa-bolt mr-1.5"></i>Simular Entrada Sede
-            </button>
-        </div>
-    </div>
-
-    <div id="visor-camara-card" class="hidden bg-white p-4 rounded-2xl border-2 border-[#197328] space-y-2.5">
-        <div id="camara-estado-msg" class="text-center text-xs font-bold text-[#197328]">
-            <i class="fa-solid fa-camera mr-1"></i>Enfoque el código QR dentro del recuadro...
-        </div>
-        <div id="qr-reader" class="w-full rounded-xl overflow-hidden bg-black min-h-[260px]"></div>
-        <button type="button" onclick="detenerCamara()" class="w-full py-2.5 rounded-xl bg-red-50 text-red-600 text-xs font-bold">Cerrar Cámara</button>
-    </div>
-
-    <!-- PASO 2: IDENTIFICACIÓN PERSONAL + BLOQUEO DE DISPOSITIVO -->
-    <div id="paso-2-card" class="{{ $sedePrevalidada ? '' : 'hidden' }} bg-white p-6 rounded-2xl border border-gray-200 space-y-4">
+    <!-- TERMINAL DIRECTA DE MARCAJE (AL ESCANEAR EL QR DE LA SEDE ABRE AQUÍ DIRECTAMENTE) -->
+    <div id="paso-2-card" class="bg-white p-6 rounded-2xl border border-gray-200 space-y-4">
         <div class="p-3 rounded-xl bg-[#E8F3EA] text-[#197328] text-xs font-bold flex items-center justify-between gap-2">
-            <span><i class="fa-solid fa-check-circle mr-1"></i>Sede Verificada: <span id="sede-activa-label">{{ $sedePrevalidada->codigo_qr_fijo ?? '' }}</span></span>
-            <button type="button" onclick="reiniciarPasoSede()" class="text-[11px] underline text-[#373A39] hover:text-rose-600 shrink-0">
-                Cambiar QR
-            </button>
+            <span><i class="fa-solid fa-building-circle-check mr-1.5"></i>Sede: <span id="sede-activa-label">{{ $sedeActiva->nombre_sede ?? 'Sede Principal Caracas' }} ({{ $sedeActiva->codigo_qr_fijo ?? 'DONSEN-SEDE-CCS-2026' }})</span></span>
+            <span class="px-2 py-0.5 rounded bg-white text-[10px] font-extrabold text-[#197328]">QR DIRECTO</span>
         </div>
-
-        <h2 class="text-base font-bold text-[#373A39]">2. Confirme su Identidad Personal</h2>
-        <p class="text-xs text-gray-500">
-            Al registrar su asistencia, este teléfono quedará vinculado exclusivamente a su cédula para evitar marcajes por terceros.
-        </p>
 
         <div class="space-y-3">
             <div>
-                <label class="block text-xs font-bold text-[#373A39] mb-1">Ingrese su Cédula de Identidad:</label>
+                <label class="block text-xs font-bold text-[#373A39] mb-1">1. Ingrese su Cédula de Identidad:</label>
                 <input type="text" id="input-identificador-emp" placeholder="Ej: V-24.512.889"
                        class="w-full px-3.5 py-3 rounded-xl border border-gray-300 text-sm font-semibold focus:ring-2 focus:ring-[#197328] focus:outline-none">
             </div>
 
-            <button type="button" onclick="enviarMarcajeAjax(document.getElementById('input-identificador-emp').value, false)"
-                    class="w-full py-3.5 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs sm:text-sm font-bold shadow-xs">
-                <i class="fa-solid fa-fingerprint mr-1.5"></i>Registrar mi Entrada / Salida
-            </button>
-
-            <button type="button" onclick="iniciarCamara('empleado')"
-                    class="w-full py-2.5 rounded-xl bg-[#F4F6F5] hover:bg-gray-200 text-[#373A39] text-xs font-bold">
-                <i class="fa-solid fa-qrcode mr-1.5"></i>O escanear mi Carnet QR Individual
-            </button>
+            <div>
+                <label class="block text-xs font-bold text-[#373A39] mb-1.5">2. Seleccione el tipo de marcaje:</label>
+                <div class="grid grid-cols-2 gap-3">
+                    <button type="button" onclick="enviarMarcajeAjax(document.getElementById('input-identificador-emp').value, 'entrada', false)"
+                            class="py-3.5 px-3 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs sm:text-sm font-bold shadow-xs flex items-center justify-center gap-1.5">
+                        <i class="fa-solid fa-right-to-bracket"></i>
+                        <span>Marcar Entrada</span>
+                    </button>
+                    <button type="button" onclick="enviarMarcajeAjax(document.getElementById('input-identificador-emp').value, 'salida', false)"
+                            class="py-3.5 px-3 rounded-xl bg-[#373A39] hover:bg-black text-white text-xs sm:text-sm font-bold shadow-xs flex items-center justify-center gap-1.5">
+                        <i class="fa-solid fa-right-from-bracket"></i>
+                        <span>Marcar Salida</span>
+                    </button>
+                </div>
+            </div>
         </div>
 
         @auth
@@ -1965,10 +2075,16 @@ LARAVEL_FILE,
                     <option value="{{ $emp->codigo_qr_empleado }}">{{ $emp->nombres_apellidos }} ({{ $emp->cedula }})</option>
                 @endforeach
             </select>
-            <button type="button" onclick="enviarMarcajeAjax(document.getElementById('select-empleado-qr').value, true)"
-                    class="w-full py-2.5 rounded-xl bg-[#373A39] text-white text-xs font-bold">
-                Simular Marcaje como Administrador
-            </button>
+            <div class="grid grid-cols-2 gap-2">
+                <button type="button" onclick="enviarMarcajeAjax(document.getElementById('select-empleado-qr').value, 'entrada', true)"
+                        class="py-2 rounded-xl bg-[#197328] text-white text-xs font-bold">
+                    Simular Entrada
+                </button>
+                <button type="button" onclick="enviarMarcajeAjax(document.getElementById('select-empleado-qr').value, 'salida', true)"
+                        class="py-2 rounded-xl bg-[#373A39] text-white text-xs font-bold">
+                    Simular Salida
+                </button>
+            </div>
         </div>
         @endauth
     </div>
@@ -1977,9 +2093,7 @@ LARAVEL_FILE,
 </div>
 
 <script>
-    const sedeCodigoOficial = @json($sedeQr->codigo_qr_fijo ?? 'DONSEN-SEDE-CCS-2026');
-    let qrSedeValidado = @json($sedePrevalidada->codigo_qr_fijo ?? null);
-    let html5Qr = null;
+    const qrSedeValidado = @json($sedeActiva->codigo_qr_fijo ?? 'DONSEN-SEDE-CCS-2026');
     let gpsCoords = { lat: null, lng: null };
 
     function solicitarUbicacionGPS() {
@@ -2020,97 +2134,12 @@ LARAVEL_FILE,
         return token;
     }
 
-    function validarSede(codigo) {
-        let limpio = (codigo || '').trim();
-        if (limpio.includes('sede=')) {
-            try {
-                const u = new URL(limpio);
-                limpio = u.searchParams.get('sede') || limpio;
-            } catch (e) {}
-        }
-        limpio = limpio.toUpperCase();
-
-        const errBox = document.getElementById('paso-1-error');
-        if (limpio !== sedeCodigoOficial.toUpperCase()) {
-            errBox.classList.remove('hidden');
-            if (limpio.startsWith('DONSEN-EMP-')) {
-                errBox.textContent = 'Escaneaste un Carnet Individual de Empleado (' + limpio + '). En el Paso 1 debes escanear el QR Fijo de la Entrada de Donsen (' + sedeCodigoOficial + ').';
-            } else {
-                errBox.textContent = 'Código QR de sede incorrecto (' + limpio + '). Escanee el QR oficial ubicado en la entrada de Donsen (' + sedeCodigoOficial + ').';
-            }
-            return;
-        }
-
-        errBox.classList.add('hidden');
-        qrSedeValidado = limpio;
-        document.getElementById('sede-activa-label').textContent = qrSedeValidado;
-        document.getElementById('paso-1-card').classList.add('hidden');
-        document.getElementById('paso-2-card').classList.remove('hidden');
-        document.getElementById('resultado-marcaje-box').classList.add('hidden');
-    }
-
-    function reiniciarPasoSede() {
-        detenerCamara();
-        qrSedeValidado = null;
-        document.getElementById('paso-1-error').classList.add('hidden');
-        document.getElementById('paso-2-card').classList.add('hidden');
-        document.getElementById('resultado-marcaje-box').classList.add('hidden');
-        document.getElementById('paso-1-card').classList.remove('hidden');
-    }
-
-    async function iniciarCamara(objetivo) {
-        await detenerCamara();
-        const visorCard = document.getElementById('visor-camara-card');
-        const msgEl = document.getElementById('camara-estado-msg');
-        visorCard.classList.remove('hidden');
-        msgEl.textContent = objetivo === 'sede'
-            ? 'Paso 1: Apunte la cámara al QR Fijo de la Sede Donsen...'
-            : 'Paso 2: Apunte la cámara al Carnet QR del Empleado...';
-
-        // Activar aceleración nativa de lectura de códigos en Android/Chrome
-        html5Qr = new Html5Qrcode('qr-reader', {
-            experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-            verbose: false
-        });
-
-        const qrboxFunc = (viewfinderWidth, viewfinderHeight) => {
-            const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-            const size = Math.max(180, Math.floor(minEdge * 0.75));
-            return { width: size, height: size };
-        };
-
-        try {
-            await html5Qr.start(
-                { facingMode: 'environment' },
-                { fps: 15, qrbox: qrboxFunc },
-                (texto) => {
-                    detenerCamara();
-                    if (objetivo === 'sede') {
-                        validarSede(texto);
-                    } else {
-                        enviarMarcajeAjax(texto, false);
-                    }
-                },
-                () => {}
-            );
-        } catch (e) {
-            detenerCamara();
-            const errBox = document.getElementById('paso-1-error');
-            errBox.classList.remove('hidden');
-            errBox.textContent = 'No se pudo abrir la cámara en el navegador. Verifique los permisos o escanee el QR de la entrada directamente con la cámara normal de su teléfono.';
-        }
-    }
-
-    async function detenerCamara() {
-        document.getElementById('visor-camara-card').classList.add('hidden');
-        if (html5Qr) {
-            try { await html5Qr.stop(); html5Qr.clear(); } catch (e) {}
-            html5Qr = null;
-        }
-    }
-
-    async function enviarMarcajeAjax(identificador, modoPruebaAdmin = false) {
+    async function enviarMarcajeAjax(identificador, tipoMarcaje, modoPruebaAdmin = false) {
         if (!identificador || !identificador.trim()) {
+            const box = document.getElementById('resultado-marcaje-box');
+            box.classList.remove('hidden');
+            box.className = 'bg-white p-5 rounded-2xl border-2 border-amber-500 shadow-md space-y-1';
+            box.innerHTML = `<div class="text-xs font-extrabold uppercase text-amber-600">Campo Requerido</div><p class="text-xs text-gray-600">Por favor ingrese su Cédula de Identidad antes de presionar Marcar Entrada o Salida.</p>`;
             return;
         }
 
@@ -2124,6 +2153,7 @@ LARAVEL_FILE,
             body: JSON.stringify({
                 qr_sede: qrSedeValidado,
                 identificador: identificador.trim(),
+                tipo_marcaje: tipoMarcaje,
                 device_token: obtenerDeviceToken(),
                 device_info: navigator.platform || 'Smartphone',
                 latitud: gpsCoords.lat,
@@ -2146,6 +2176,110 @@ LARAVEL_FILE,
         `;
     }
 </script>
+@endsection
+LARAVEL_FILE,
+
+    'resources/views/usuarios/index.blade.php' => <<<'LARAVEL_FILE'
+@extends('layouts.app')
+@section('title', 'Roles y Permisos | Donsen®')
+
+@section('content')
+<div class="space-y-6">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-extrabold text-[#373A39]">Gestión de Usuarios, Roles y Permisos</h1>
+            <p class="text-sm text-gray-500">Define qué módulos y acciones puede ejecutar cada perfil administrativo en Donsen</p>
+        </div>
+        <button type="button" onclick="document.getElementById('modal-nuevo-usuario').classList.remove('hidden')"
+                class="px-4 py-2.5 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs font-bold">
+            <i class="fa-solid fa-user-plus mr-1.5"></i>Nuevo Usuario Administrativo
+        </button>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+        @foreach($usuarios as $u)
+        <div class="bg-white p-5 rounded-2xl border border-gray-200 space-y-4">
+            <div class="flex items-start justify-between gap-3 border-b border-gray-100 pb-3">
+                <div>
+                    <span class="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-[#E8F3EA] text-[#197328]">{{ $u->rol }}</span>
+                    <h2 class="text-base font-extrabold text-[#373A39] mt-1">{{ $u->name }}</h2>
+                    <p class="text-xs text-gray-500">{{ $u->email }}</p>
+                </div>
+                @if($u->id !== Auth::id())
+                <form method="POST" action="{{ route('usuarios.destroy', $u) }}" onsubmit="return confirm('¿Eliminar usuario {{ $u->name }}?');">
+                    @csrf @method('DELETE')
+                    <button type="submit" class="px-2.5 py-1.5 rounded-xl bg-red-50 hover:bg-red-600 text-red-600 hover:text-white text-xs font-bold">
+                        <i class="fa-solid fa-trash"></i>
+                    </button>
+                </form>
+                @endif
+            </div>
+
+            <form method="POST" action="{{ route('usuarios.update', $u) }}" class="space-y-3">
+                @csrf @method('PUT')
+                <div class="grid grid-cols-2 gap-2.5">
+                    <div>
+                        <label class="block text-[11px] font-bold text-gray-500 mb-1">Nombre</label>
+                        <input type="text" name="name" value="{{ $u->name }}" required class="w-full px-3 py-2 rounded-xl border text-xs font-semibold">
+                    </div>
+                    <div>
+                        <label class="block text-[11px] font-bold text-gray-500 mb-1">Rol Asignado</label>
+                        <input type="text" name="rol" value="{{ $u->rol }}" required placeholder="Ej: Supervisor RRHH" class="w-full px-3 py-2 rounded-xl border text-xs font-semibold">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-[11px] font-bold text-gray-500 mb-1.5">Permisos Habilitados:</label>
+                    <div class="space-y-1.5 bg-[#F4F6F5] p-3 rounded-xl">
+                        @foreach($catalogoPermisos as $clave => $etiqueta)
+                        <label class="flex items-center gap-2 text-xs text-[#373A39] cursor-pointer">
+                            <input type="checkbox" name="permisos[]" value="{{ $clave }}"
+                                   {{ $u->tienePermiso($clave) ? 'checked' : '' }}
+                                   class="rounded text-[#197328] focus:ring-[#197328]">
+                            <span>{{ $etiqueta }}</span>
+                        </label>
+                        @endforeach
+                    </div>
+                </div>
+
+                <div class="flex items-center gap-2 pt-1">
+                    <input type="password" name="password" placeholder="Nueva contraseña (opcional)" class="flex-1 px-3 py-2 rounded-xl border text-xs">
+                    <button type="submit" class="px-4 py-2 rounded-xl bg-[#373A39] hover:bg-black text-white text-xs font-bold">
+                        Guardar Cambios
+                    </button>
+                </div>
+            </form>
+        </div>
+        @endforeach
+    </div>
+</div>
+
+<!-- Modal Nuevo Usuario -->
+<div id="modal-nuevo-usuario" class="hidden fixed inset-0 z-40 bg-black/50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-md w-full p-6 space-y-4">
+        <div class="flex justify-between items-center border-b pb-3">
+            <h3 class="text-base font-bold">Crear Usuario con Rol y Permisos</h3>
+            <button type="button" onclick="document.getElementById('modal-nuevo-usuario').classList.add('hidden')"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <form method="POST" action="{{ route('usuarios.store') }}" class="space-y-3">
+            @csrf
+            <input type="text" name="name" placeholder="Nombre completo" required class="w-full px-3 py-2 rounded-xl border text-sm">
+            <input type="email" name="email" placeholder="Correo electrónico" required class="w-full px-3 py-2 rounded-xl border text-sm">
+            <input type="password" name="password" placeholder="Contraseña (mín. 6 caracteres)" required class="w-full px-3 py-2 rounded-xl border text-sm">
+            <input type="text" name="rol" placeholder="Nombre del Rol (Ej: Jefe de Almacén, Administradora)" required class="w-full px-3 py-2 rounded-xl border text-sm">
+            <div class="space-y-1.5 bg-[#F4F6F5] p-3 rounded-xl">
+                <div class="text-[11px] font-bold text-gray-500 mb-1">Permisos del Rol:</div>
+                @foreach($catalogoPermisos as $clave => $etiqueta)
+                <label class="flex items-center gap-2 text-xs text-[#373A39]">
+                    <input type="checkbox" name="permisos[]" value="{{ $clave }}" checked class="rounded text-[#197328]">
+                    <span>{{ $etiqueta }}</span>
+                </label>
+                @endforeach
+            </div>
+            <button type="submit" class="w-full py-2.5 rounded-xl bg-[#197328] text-white text-xs font-bold">Crear Usuario</button>
+        </form>
+    </div>
+</div>
 @endsection
 LARAVEL_FILE,
 
@@ -2183,6 +2317,7 @@ LARAVEL_FILE,
             <option value="">Todos los Estatus</option>
             <option value="A tiempo" {{ request('estatus') == 'A tiempo' ? 'selected' : '' }}>A tiempo</option>
             <option value="Retardo" {{ request('estatus') == 'Retardo' ? 'selected' : '' }}>Retardo</option>
+            <option value="Permiso" {{ request('estatus') == 'Permiso' ? 'selected' : '' }}>Permiso</option>
             <option value="Inasistencia" {{ request('estatus') == 'Inasistencia' ? 'selected' : '' }}>Inasistencia</option>
         </select>
         <button type="submit" class="py-2 px-4 rounded-xl bg-[#197328] text-white text-xs font-bold">Filtrar Resultados</button>
@@ -2220,12 +2355,12 @@ LARAVEL_FILE,
                                    class="inline-flex items-center gap-1 text-blue-600 hover:underline font-semibold">
                                     <i class="fa-solid fa-location-dot"></i>
                                     <span>{{ $r->distancia_metros !== null ? $r->distancia_metros . 'm' : 'Mapa' }}</span>
-                                </a>
-                            @else
-                                <span class="text-gray-400">N/A</span>
+                        <td class="py-3 px-4 font-bold">
+                            {{ $r->estatus }}
+                            @if($r->estatus === 'Permiso' && $r->motivo_permiso)
+                                <div class="text-[11px] font-normal text-blue-600">{{ $r->motivo_permiso }}</div>
                             @endif
                         </td>
-                        <td class="py-3 px-4 font-bold">{{ $r->estatus }}</td>
                     </tr>
                     @empty
                     <tr>

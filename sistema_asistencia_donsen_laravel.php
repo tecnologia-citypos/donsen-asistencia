@@ -783,6 +783,7 @@ use App\Models\Empleado;
 use App\Models\Departamento;
 use App\Models\Horario;
 use App\Models\SedeQr;
+use App\Models\Asistencia;
 
 class EmpleadoController extends Controller
 {

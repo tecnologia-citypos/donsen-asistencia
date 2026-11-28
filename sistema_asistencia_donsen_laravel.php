@@ -2052,6 +2052,144 @@ LARAVEL_FILE,
 </div>
 
 <script>
+    const urlMarcajeDirectoSede = @json(route('scanner.index', ['sede' => $sedeQr->codigo_qr_fijo ?? 'DONSEN-SEDE-CCS-2026']));
+
+    document.addEventListener('DOMContentLoaded', () => {
+        if (typeof QRCode !== 'undefined') {
+            const boxPreview = document.getElementById('qr-sede-preview');
+            if (boxPreview) {
+                new QRCode(boxPreview, { text: urlMarcajeDirectoSede, width: 100, height: 100, colorDark: '#000000', colorLight: '#FFFFFF', correctLevel: QRCode.CorrectLevel.M });
+            }
+            const boxHd = document.getElementById('qr-sede-hd');
+            if (boxHd) {
+                new QRCode(boxHd, { text: urlMarcajeDirectoSede, width: 220, height: 220, colorDark: '#000000', colorLight: '#FFFFFF', correctLevel: QRCode.CorrectLevel.M });
+            }
+        }
+    });
+
+    function abrirModalPermiso(empId = '') {
+        if (empId) document.getElementById('permiso-empleado-id').value = empId;
+        document.getElementById('modal-permiso-laboral').classList.remove('hidden');
+    }
+
+    function capturarUbicacionActualSede() {
+        if (!navigator.geolocation) return;
+        navigator.geolocation.getCurrentPosition((pos) => {
+            document.getElementById('input-sede-lat').value = pos.coords.latitude.toFixed(7);
+            document.getElementById('input-sede-lng').value = pos.coords.longitude.toFixed(7);
+        }, () => {}, { enableHighAccuracy: true });
+    }
+
+    function mostrarCarnetQR(nombre, cargo, cedula, token) {
+        document.getElementById('carnet-nombre').textContent = nombre;
+        document.getElementById('carnet-cargo').textContent = cargo;
+        document.getElementById('carnet-cedula').textContent = 'C.I: ' + cedula;
+        document.getElementById('carnet-token').textContent = token;
+        const box = document.getElementById('carnet-qr-box');
+        box.innerHTML = '';
+        new QRCode(box, { text: token, width: 170, height: 170, colorDark: '#373A39', colorLight: '#FFFFFF' });
+        document.getElementById('modal-carnet-qr').classList.remove('hidden');
+    }
+
+    function descargarCartelQRSede() {
+        const canvas = document.querySelector('#qr-sede-hd canvas');
+        if (!canvas) return;
+        const link = document.createElement('a');
+        link.download = 'QR_Fisico_Entrada_Donsen.png';
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+    }
+</script>
+@endsection
+LARAVEL_FILE,
+
+    'resources/views/scanner/index.blade.php' => <<<'LARAVEL_FILE'
+@extends('layouts.app')
+@section('title', 'Marcaje QR | Donsen®')
+
+@section('content')
+@php
+    $sedeActiva = $sedePrevalidada ?? $sedeQr;
+@endphp
+<div class="max-w-lg mx-auto space-y-5">
+    <div class="bg-white p-6 rounded-2xl border border-gray-200 text-center">
+        <span class="px-3 py-1 rounded-full bg-[#E8F3EA] text-[#197328] text-xs font-bold">
+            QR Físico Sede + Geocerca GPS + Móvil Único
+        </span>
+        <h1 class="text-xl font-extrabold text-[#373A39] mt-2">Registro de Asistencia Laboral</h1>
+        <p class="text-xs text-gray-500 mt-1">Validación física en sede mediante GPS en mapa y teléfono vinculado</p>
+
+        <div id="gps-status-pill" class="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-50 text-amber-700 text-[11px] font-semibold">
+            <i class="fa-solid fa-satellite-dish animate-pulse"></i>
+            <span id="gps-status-text">Obteniendo ubicación GPS para validar presencia en sede...</span>
+        </div>
+    </div>
+
+    <div id="paso-2-card" class="bg-white p-6 rounded-2xl border border-gray-200 space-y-4">
+        <div class="p-3.5 rounded-xl bg-[#E8F3EA] border border-[#197328]/30 flex items-center justify-between gap-2">
+            <div class="text-xs font-bold text-[#197328]">
+                <i class="fa-solid fa-circle-check mr-1"></i>Sede Verificada: {{ $sedeActiva->nombre_sede ?? 'Sede Principal Caracas' }}
+            </div>
+            <span class="px-2 py-0.5 rounded bg-white text-[10px] font-extrabold text-[#197328] border border-[#197328]/20">
+                MÓVIL PROTEGIDO
+            </span>
+        </div>
+
+        <div>
+            <h2 class="text-base font-bold text-[#373A39]">1. Confirme su Identidad Personal</h2>
+            <p class="text-xs text-gray-500 mt-0.5">
+                Al registrar su asistencia, este teléfono quedará vinculado exclusivamente a su cédula para evitar marcajes por terceros.
+            </p>
+        </div>
+
+        <div class="space-y-3">
+            <div>
+                <label class="block text-xs font-bold text-gray-600 mb-1">Ingrese su Cédula de Identidad:</label>
+                <input type="text" id="input-cedula-marcaje" placeholder="Ej: V-24.512.889"
+                       class="w-full px-4 py-3 rounded-xl border border-gray-300 text-base font-bold tracking-wide focus:ring-2 focus:ring-[#197328] focus:outline-none">
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 pt-1">
+                <button type="button" onclick="enviarMarcajeAjax(document.getElementById('input-cedula-marcaje').value, 'entrada')"
+                        class="w-full py-3.5 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-sm font-extrabold shadow-sm transition">
+                    <i class="fa-solid fa-right-to-bracket mr-1.5"></i>Marcar Entrada
+                </button>
+                <button type="button" onclick="enviarMarcajeAjax(document.getElementById('input-cedula-marcaje').value, 'salida')"
+                        class="w-full py-3.5 rounded-xl bg-[#373A39] hover:bg-black text-white text-sm font-extrabold shadow-sm transition">
+                    <i class="fa-solid fa-right-from-bracket mr-1.5"></i>Marcar Salida
+                </button>
+            </div>
+        </div>
+
+        @auth
+        <div class="pt-4 border-t border-gray-100 space-y-2">
+            <label class="block text-xs font-bold text-gray-500">Simulación Administrativa (Sin vincular dispositivo):</label>
+            <select id="select-empleado-scan" class="w-full px-3 py-2.5 rounded-xl border text-xs bg-white">
+                @foreach($empleados as $emp)
+                    @php $r = $asistenciasHoy->get($emp->id); @endphp
+                    <option value="{{ $emp->codigo_qr_empleado }}">
+                        {{ $emp->nombres_apellidos }} ({{ $emp->cedula }}) — {{ !$r ? 'Sin entrada' : (!$r->hora_salida ? 'Entrada: '.substr($r->hora_entrada,0,5) : 'Completado') }}
+                    </option>
+                @endforeach
+            </select>
+            <div class="grid grid-cols-2 gap-2">
+                <button type="button" onclick="enviarMarcajeAjax(document.getElementById('select-empleado-scan').value, 'entrada', true)"
+                        class="w-full py-2.5 rounded-xl bg-[#E8F3EA] hover:bg-[#197328] text-[#197328] hover:text-white text-xs font-bold transition">
+                    Simular Entrada
+                </button>
+                <button type="button" onclick="enviarMarcajeAjax(document.getElementById('select-empleado-scan').value, 'salida', true)"
+                        class="w-full py-2.5 rounded-xl bg-gray-100 hover:bg-[#373A39] text-[#373A39] hover:text-white text-xs font-bold transition">
+                    Simular Salida
+                </button>
+            </div>
+        </div>
+        @endauth
+    </div>
+
+    <div id="resultado-marcaje-box" class="hidden bg-white p-6 rounded-2xl border-2 border-[#197328] shadow-md space-y-2"></div>
+</div>
+
+<script>
     const qrSedeValidado = @json($sedeActiva->codigo_qr_fijo ?? 'DONSEN-SEDE-CCS-2026');
     let gpsCoords = { lat: null, lng: null };
 

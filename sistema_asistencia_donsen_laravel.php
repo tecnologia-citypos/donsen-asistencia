@@ -1832,6 +1832,90 @@ LARAVEL_FILE,
             </button>
         </div>
     </div>
+
+    @if($sedeQr)
+    <div class="bg-white p-5 rounded-2xl border border-gray-200 grid grid-cols-1 lg:grid-cols-12 gap-5 items-center">
+        <div class="lg:col-span-5 flex items-center gap-4">
+            <div id="qr-sede-preview" class="p-2 bg-white border-2 border-[#197328] rounded-xl shrink-0"></div>
+            <div class="space-y-1.5">
+                <span class="px-2 py-0.5 rounded bg-[#E8F3EA] text-[#197328] text-[10px] font-extrabold uppercase">QR Físico Entrada Sede</span>
+                <div class="text-sm font-extrabold text-[#373A39]">{{ $sedeQr->nombre_sede }}</div>
+                <div class="text-xs text-gray-500">{{ $sedeQr->ubicacion }}</div>
+                <div class="flex flex-wrap gap-1.5 pt-1">
+                    <button type="button" onclick="document.getElementById('modal-sede-hd').classList.remove('hidden')"
+                            class="px-3 py-1.5 rounded-lg bg-[#197328] text-white text-xs font-bold">
+                        <i class="fa-solid fa-expand mr-1"></i>Ver Cartel Grande
+                    </button>
+                    <button type="button" onclick="descargarCartelQRSede()"
+                            class="px-3 py-1.5 rounded-lg bg-[#373A39] text-white text-xs font-bold">
+                        <i class="fa-solid fa-download mr-1"></i>Descargar PNG
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <form method="POST" action="{{ route('sede.ubicacion', $sedeQr) }}" class="lg:col-span-7 bg-[#F4F6F5] p-4 rounded-xl space-y-2.5">
+            @csrf @method('PUT')
+            <div class="flex items-center justify-between">
+                <span class="text-xs font-extrabold text-[#373A39]"><i class="fa-solid fa-map-location-dot text-[#197328] mr-1"></i>Geocerca GPS de Sede</span>
+                <button type="button" onclick="capturarUbicacionActualSede()" class="px-2.5 py-1 rounded-lg bg-blue-600 text-white text-[11px] font-bold">
+                    <i class="fa-solid fa-crosshairs mr-1"></i>Usar mi GPS actual
+                </button>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <input type="text" name="nombre_sede" value="{{ $sedeQr->nombre_sede }}" required class="px-3 py-1.5 rounded-lg border bg-white text-xs">
+                <input type="text" name="ubicacion" value="{{ $sedeQr->ubicacion }}" required class="px-3 py-1.5 rounded-lg border bg-white text-xs">
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+                <input type="text" id="input-sede-lat" name="latitud" value="{{ $sedeQr->latitud }}" placeholder="Latitud" required class="px-3 py-1.5 rounded-lg border bg-white text-xs">
+                <input type="text" id="input-sede-lng" name="longitud" value="{{ $sedeQr->longitud }}" placeholder="Longitud" required class="px-3 py-1.5 rounded-lg border bg-white text-xs">
+                <input type="number" name="radio_metros" value="{{ $sedeQr->radio_metros }}" min="20" max="5000" required class="px-3 py-1.5 rounded-lg border bg-white text-xs" title="Radio en metros">
+            </div>
+            <button type="submit" class="px-4 py-1.5 rounded-lg bg-[#197328] text-white text-xs font-bold">
+                Guardar Geocerca GPS
+            </button>
+        </form>
+    </div>
+    @endif
+
+    <div class="bg-white rounded-2xl border border-gray-200 overflow-hidden">
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse">
+                <thead>
+                    <tr class="bg-[#F4F6F5] text-gray-500 text-xs uppercase border-b border-gray-200">
+                        <th class="py-3 px-4">Cédula</th>
+                        <th class="py-3 px-4">Trabajador</th>
+                        <th class="py-3 px-4">Departamento / Cargo</th>
+                        <th class="py-3 px-4">Turno</th>
+                        <th class="py-3 px-4">Estado</th>
+                        <th class="py-3 px-4 text-right">Acciones</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-100 text-sm">
+                    @foreach($empleados as $emp)
+                    <tr>
+                        <td class="py-3 px-4 font-mono text-xs">{{ $emp->cedula }}</td>
+                        <td class="py-3 px-4">
+                            <div class="font-bold text-[#373A39]">{{ $emp->nombres_apellidos }}</div>
+                            @if($emp->device_token)
+                                <span class="text-[10px] text-[#197328] font-semibold"><i class="fa-solid fa-mobile-screen-button mr-1"></i>Móvil vinculado</span>
+                            @endif
+                        </td>
+                        <td class="py-3 px-4">
+                            <div class="text-xs font-bold">{{ $emp->departamento->nombre_departamento }}</div>
+                            <div class="text-xs text-gray-500">{{ $emp->cargo }}</div>
+                        </td>
+                        <td class="py-3 px-4 text-xs text-gray-600">
+                            {{ $emp->horario->turno }} ({{ substr($emp->horario->hora_entrada, 0, 5) }} - {{ substr($emp->horario->hora_salida, 0, 5) }})
+                        </td>
+                        <td class="py-3 px-4">
+                            <form method="POST" action="{{ route('empleados.toggle', $emp) }}">
+                                @csrf @method('PATCH')
+                                <button type="submit" class="px-2.5 py-1 rounded-full text-xs font-bold {{ $emp->estado ? 'bg-[#E8F3EA] text-[#197328]' : 'bg-gray-200 text-gray-600' }}">
+                                    {{ $emp->estado ? 'Activo' : 'Inactivo' }}
+                                </button>
+                            </form>
+                        </td>
                         <td class="py-3 px-4 text-right whitespace-nowrap">
                             <div class="inline-flex items-center gap-1.5">
                                 @if(Auth::user()->tienePermiso('permisos_laborales'))
@@ -1907,189 +1991,64 @@ LARAVEL_FILE,
     </div>
 </div>
 
-<script>
-    const urlSedeQr = '{{ url("/marcaje-qr?sede=" . ($sedeQr->codigo_qr_fijo ?? "DONSEN-SEDE-CCS-2026")) }}';
-
-    document.addEventListener('DOMContentLoaded', () => {
-        if (typeof QRCode === 'undefined') return;
-        const sedeBox = document.getElementById('qr-sede-preview');
-        if (sedeBox) {
-            new QRCode(sedeBox, {
-                text: urlSedeQr,
-                width: 104,
-                height: 104,
-                colorDark: '#000000',
-                colorLight: '#FFFFFF',
-                correctLevel: QRCode.CorrectLevel.M
-            });
-        }
-        const sedeHdBox = document.getElementById('qr-sede-hd');
-        if (sedeHdBox) {
-            new QRCode(sedeHdBox, {
-                text: urlSedeQr,
-                width: 240,
-                height: 240,
-                colorDark: '#000000',
-                colorLight: '#FFFFFF',
-                correctLevel: QRCode.CorrectLevel.M
-            });
-        }
-    });
-
-    function capturarUbicacionActualSede() {
-        if (!navigator.geolocation) return;
-        navigator.geolocation.getCurrentPosition((pos) => {
-            document.getElementById('input-sede-lat').value = pos.coords.latitude.toFixed(7);
-            document.getElementById('input-sede-lng').value = pos.coords.longitude.toFixed(7);
-        }, () => {}, { enableHighAccuracy: true });
-    }
-
-    function descargarCartelQRSede() {
-        const qrCanvas = document.querySelector('#qr-sede-hd canvas') || document.querySelector('#qr-sede-preview canvas');
-        if (!qrCanvas) return;
-
-        // Generar cartel imprimible HD (480x620) con amplio margen blanco para lectura instantánea
-        const poster = document.createElement('canvas');
-        poster.width = 480;
-        poster.height = 620;
-        const ctx = poster.getContext('2d');
-
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(0, 0, 480, 620);
-        ctx.strokeStyle = '#197328';
-        ctx.lineWidth = 12;
-        ctx.strokeRect(6, 6, 468, 608);
-
-        ctx.fillStyle = '#373A39';
-        ctx.font = 'italic 900 48px Arial, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('donsen®', 240, 74);
-
-        ctx.fillStyle = '#197328';
-        ctx.fillRect(110, 88, 260, 8);
-        ctx.fillRect(90, 100, 280, 10);
-
-        ctx.fillStyle = '#197328';
-        ctx.font = 'bold 16px Arial, sans-serif';
-        ctx.fillText('CONTROL DE ASISTENCIA - ENTRADA SEDE', 240, 138);
-
-        // Dibujar QR de alta resolución con margen blanco alrededor
-        ctx.drawImage(qrCanvas, 90, 165, 300, 300);
-
-        ctx.fillStyle = '#373A39';
-        ctx.font = 'bold 16px monospace';
-        ctx.fillText('{{ $sedeQr->codigo_qr_fijo ?? "DONSEN-SEDE-CCS-2026" }}', 240, 505);
-
-        ctx.fillStyle = '#4B5563';
-        ctx.font = '14px Arial, sans-serif';
-        ctx.fillText('Escanee este código con su teléfono al entrar o salir', 240, 540);
-        ctx.fillText('{{ $sedeQr->nombre_sede ?? "Sede Principal Caracas" }}', 240, 565);
-
-        const link = document.createElement('a');
-        link.download = 'Cartel_QR_Entrada_Donsen_HD.png';
-        link.href = poster.toDataURL('image/png');
-        link.click();
-    }
-
-    function abrirModalPermiso(empId = null) {
-        if (empId) {
-            document.getElementById('permiso-empleado-id').value = empId;
-        }
-        document.getElementById('modal-permiso-laboral').classList.remove('hidden');
-    }
-
-    function mostrarCarnetQR(nombre, cargo, cedula, token) {
-        document.getElementById('carnet-nombre').textContent = nombre;
-        document.getElementById('carnet-cargo').textContent = cargo;
-        document.getElementById('carnet-cedula').textContent = 'C.I: ' + cedula;
-        document.getElementById('carnet-token').textContent = token;
-        const box = document.getElementById('carnet-qr-box');
-        box.innerHTML = '';
-        new QRCode(box, { text: token, width: 200, height: 200, colorDark: '#000000', colorLight: '#FFFFFF', correctLevel: QRCode.CorrectLevel.M });
-        document.getElementById('modal-carnet-qr').classList.remove('hidden');
-    }
-</script>
-@endsection
-LARAVEL_FILE,
-
-    'resources/views/scanner/index.blade.php' => <<<'LARAVEL_FILE'
-@extends('layouts.app')
-@section('title', 'Marcaje QR Empleado | Donsen®')
-
-@section('content')
-@php
-    // El QR físico de la sede lleva directamente a esta pantalla con la sede ya validada
-    $sedeActiva = $sedePrevalidada ?? $sedeQr;
-@endphp
-<div class="max-w-lg mx-auto space-y-5">
-    <div class="bg-white p-5 rounded-2xl border border-gray-200 text-center">
-        <span class="px-3 py-1 rounded-full bg-[#E8F3EA] text-[#197328] text-xs font-bold">
-            <i class="fa-solid fa-location-dot mr-1"></i>Geocerca GPS + Dispositivo Único • Donsen
-        </span>
-        <h1 class="text-xl font-extrabold text-[#373A39] mt-2">Registro de Asistencia Laboral</h1>
-        <p class="text-xs text-gray-500 mt-1">Seleccione si marca Entrada o Salida e ingrese su Cédula de Identidad</p>
-        <div id="gps-status-pill" class="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-amber-50 text-amber-700 text-[11px] font-semibold">
-            <i class="fa-solid fa-satellite-dish"></i>
-            <span id="gps-status-text">Obteniendo coordenadas GPS del mapa...</span>
+<!-- Modal Nuevo Empleado -->
+<div id="modal-nuevo-emp" class="hidden fixed inset-0 z-40 bg-black/50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-md w-full p-6 space-y-4">
+        <div class="flex justify-between items-center border-b pb-3">
+            <h3 class="text-base font-bold text-[#373A39]">Registrar Nuevo Trabajador</h3>
+            <button type="button" onclick="document.getElementById('modal-nuevo-emp').classList.add('hidden')"><i class="fa-solid fa-xmark"></i></button>
         </div>
-    </div>
-
-    <!-- TERMINAL DIRECTA DE MARCAJE (AL ESCANEAR EL QR DE LA SEDE ABRE AQUÍ DIRECTAMENTE) -->
-    <div id="paso-2-card" class="bg-white p-6 rounded-2xl border border-gray-200 space-y-4">
-        <div class="p-3 rounded-xl bg-[#E8F3EA] text-[#197328] text-xs font-bold flex items-center justify-between gap-2">
-            <span><i class="fa-solid fa-building-circle-check mr-1.5"></i>Sede: <span id="sede-activa-label">{{ $sedeActiva->nombre_sede ?? 'Sede Principal Caracas' }} ({{ $sedeActiva->codigo_qr_fijo ?? 'DONSEN-SEDE-CCS-2026' }})</span></span>
-            <span class="px-2 py-0.5 rounded bg-white text-[10px] font-extrabold text-[#197328]">QR DIRECTO</span>
-        </div>
-
-        <div class="space-y-3">
-            <div>
-                <label class="block text-xs font-bold text-[#373A39] mb-1">1. Ingrese su Cédula de Identidad:</label>
-                <input type="text" id="input-identificador-emp" placeholder="Ej: V-24.512.889"
-                       class="w-full px-3.5 py-3 rounded-xl border border-gray-300 text-sm font-semibold focus:ring-2 focus:ring-[#197328] focus:outline-none">
-            </div>
-
-            <div>
-                <label class="block text-xs font-bold text-[#373A39] mb-1.5">2. Seleccione el tipo de marcaje:</label>
-                <div class="grid grid-cols-2 gap-3">
-                    <button type="button" onclick="enviarMarcajeAjax(document.getElementById('input-identificador-emp').value, 'entrada', false)"
-                            class="py-3.5 px-3 rounded-xl bg-[#197328] hover:bg-[#13591F] text-white text-xs sm:text-sm font-bold shadow-xs flex items-center justify-center gap-1.5">
-                        <i class="fa-solid fa-right-to-bracket"></i>
-                        <span>Marcar Entrada</span>
-                    </button>
-                    <button type="button" onclick="enviarMarcajeAjax(document.getElementById('input-identificador-emp').value, 'salida', false)"
-                            class="py-3.5 px-3 rounded-xl bg-[#373A39] hover:bg-black text-white text-xs sm:text-sm font-bold shadow-xs flex items-center justify-center gap-1.5">
-                        <i class="fa-solid fa-right-from-bracket"></i>
-                        <span>Marcar Salida</span>
-                    </button>
-                </div>
-            </div>
-        </div>
-
-        @auth
-        <div class="pt-4 border-t border-gray-200 space-y-2.5">
-            <div class="text-[11px] font-bold uppercase text-amber-700">
-                <i class="fa-solid fa-user-shield mr-1"></i>Modo Simulación (Solo Administrador Logueado):
-            </div>
-            <select id="select-empleado-qr" class="w-full px-3 py-2 rounded-xl border bg-white text-xs font-semibold">
-                @foreach($empleados as $emp)
-                    <option value="{{ $emp->codigo_qr_empleado }}">{{ $emp->nombres_apellidos }} ({{ $emp->cedula }})</option>
+        <form method="POST" action="{{ route('empleados.store') }}" class="space-y-3">
+            @csrf
+            <input type="text" name="cedula" placeholder="Cédula (Ej: V-25.123.456)" required class="w-full px-3 py-2.5 rounded-xl border text-sm">
+            <input type="text" name="nombres_apellidos" placeholder="Nombres y Apellidos" required class="w-full px-3 py-2.5 rounded-xl border text-sm">
+            <input type="text" name="cargo" placeholder="Cargo (Ej: Almacenista)" required class="w-full px-3 py-2.5 rounded-xl border text-sm">
+            <select name="departamento_id" required class="w-full px-3 py-2.5 rounded-xl border text-sm bg-white">
+                @foreach($departamentos as $d)
+                    <option value="{{ $d->id }}">{{ $d->nombre_departamento }}</option>
                 @endforeach
             </select>
-            <div class="grid grid-cols-2 gap-2">
-                <button type="button" onclick="enviarMarcajeAjax(document.getElementById('select-empleado-qr').value, 'entrada', true)"
-                        class="py-2 rounded-xl bg-[#197328] text-white text-xs font-bold">
-                    Simular Entrada
-                </button>
-                <button type="button" onclick="enviarMarcajeAjax(document.getElementById('select-empleado-qr').value, 'salida', true)"
-                        class="py-2 rounded-xl bg-[#373A39] text-white text-xs font-bold">
-                    Simular Salida
-                </button>
-            </div>
-        </div>
-        @endauth
+            <select name="horario_id" required class="w-full px-3 py-2.5 rounded-xl border text-sm bg-white">
+                @foreach($horarios as $h)
+                    <option value="{{ $h->id }}">{{ $h->turno }} ({{ substr($h->hora_entrada, 0, 5) }} - {{ substr($h->hora_salida, 0, 5) }})</option>
+                @endforeach
+            </select>
+            <input type="hidden" name="estado" value="1">
+            <button type="submit" class="w-full py-2.5 rounded-xl bg-[#197328] text-white text-xs font-bold">
+                Guardar y Generar QR
+            </button>
+        </form>
     </div>
+</div>
 
-    <div id="resultado-marcaje-box" class="hidden bg-white p-6 rounded-2xl border-2 shadow-md space-y-2"></div>
+<!-- Modal Cartel QR Grande de Sede -->
+<div id="modal-sede-hd" class="hidden fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-sm w-full p-6 text-center space-y-4">
+        <div class="flex justify-between items-center border-b pb-2">
+            <span class="text-sm font-extrabold text-[#197328]">Cartel QR Entrada Principal</span>
+            <button type="button" onclick="document.getElementById('modal-sede-hd').classList.add('hidden')"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div id="qr-sede-hd" class="flex justify-center p-3 bg-white border-2 border-[#197328] rounded-xl"></div>
+        <div class="text-xs font-mono font-bold text-[#373A39]">{{ $sedeQr->codigo_qr_fijo ?? 'DONSEN-SEDE-CCS-2026' }}</div>
+        <button type="button" onclick="descargarCartelQRSede()" class="w-full py-2.5 rounded-xl bg-[#197328] text-white text-xs font-bold">
+            <i class="fa-solid fa-download mr-1.5"></i>Descargar Cartel Imprimible (PNG)
+        </button>
+    </div>
+</div>
+
+<!-- Modal Carnet QR Individual -->
+<div id="modal-carnet-qr" class="hidden fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl max-w-sm w-full p-6 text-center space-y-3">
+        <div class="flex justify-between items-center border-b pb-2">
+            <span class="text-sm font-extrabold text-[#373A39]">Credencial QR Individual</span>
+            <button type="button" onclick="document.getElementById('modal-carnet-qr').classList.add('hidden')"><i class="fa-solid fa-xmark"></i></button>
+        </div>
+        <div id="carnet-qr-box" class="flex justify-center p-3 bg-white border rounded-xl"></div>
+        <div id="carnet-nombre" class="text-base font-extrabold text-[#373A39]"></div>
+        <div id="carnet-cargo" class="text-xs font-semibold text-[#197328]"></div>
+        <div id="carnet-cedula" class="text-xs text-gray-500"></div>
+        <div id="carnet-token" class="text-[11px] font-mono bg-gray-100 py-1 px-2 rounded"></div>
+    </div>
 </div>
 
 <script>
@@ -2355,6 +2314,11 @@ LARAVEL_FILE,
                                    class="inline-flex items-center gap-1 text-blue-600 hover:underline font-semibold">
                                     <i class="fa-solid fa-location-dot"></i>
                                     <span>{{ $r->distancia_metros !== null ? $r->distancia_metros . 'm' : 'Mapa' }}</span>
+                                </a>
+                            @else
+                                <span class="text-gray-400">—</span>
+                            @endif
+                        </td>
                         <td class="py-3 px-4 font-bold">
                             {{ $r->estatus }}
                             @if($r->estatus === 'Permiso' && $r->motivo_permiso)
